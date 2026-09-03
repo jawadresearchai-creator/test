@@ -151,4 +151,6 @@ jobs:
   v04-real-public-omics:
     if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/feature/v0.4-real-public-omics' }}
     uses: ./.github/workflows/v04-real-public-omics.yml
+    with:
+      execute_real_public_omics: true
     secrets: inherit
