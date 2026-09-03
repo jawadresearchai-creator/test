@@ -24,6 +24,8 @@ if (!identical(marker$analysis_lock_sha256, lock$analysis_lock_sha256)) stop("an
 if (!identical(marker$dataset_freeze_sha256, freeze$freeze_sha256)) stop("dataset-freeze marker mismatch")
 if (!identical(manifest$analysis$de_method, "DESeq2")) stop("manifest does not lock DESeq2")
 if (!identical(manifest$analysis$independent_filtering, FALSE)) stop("v0.4 requires DESeq2 independent filtering disabled")
+if (!identical(manifest$analysis$cooks_cutoff, FALSE)) stop("v0.4 requires Cook's-distance result exclusion disabled")
+if (!identical(manifest$analysis$outlier_policy, "report_not_exclude")) stop("v0.4 outlier policy mismatch")
 
 asset_for <- function(asset_id) {
   matches <- Filter(function(x) identical(x$asset_id, asset_id), freeze$assets)
@@ -77,6 +79,7 @@ res <- results(
   contrast = c("genotype", numerator, reference),
   alpha = as.numeric(manifest$analysis$fdr_threshold),
   independentFiltering = FALSE,
+  cooksCutoff = FALSE,
   pAdjustMethod = "BH"
 )
 
@@ -95,11 +98,20 @@ up <- sig & res_df$log2FoldChange > 0
 down <- sig & res_df$log2FoldChange < 0
 write.csv(res_df[sig, , drop = FALSE], file.path(out_dir, "deseq2_enrichment_candidates.csv"), row.names = FALSE, na = "")
 
-norm <- counts(dds, normalized = TRUE)
 vsd <- vst(dds, blind = FALSE)
 pca <- plotPCA(vsd, intgroup = "genotype", returnData = TRUE)
 pca$sample <- rownames(pca)
 write.csv(pca, file.path(out_dir, "pca_coordinates.csv"), row.names = FALSE)
+
+cooks <- assays(dds)[["cooks"]]
+finite_cooks <- cooks[is.finite(cooks)]
+cooks_diag <- list(
+  available = !is.null(cooks),
+  finite_values = length(finite_cooks),
+  maximum = if (length(finite_cooks)) max(finite_cooks) else NULL,
+  median = if (length(finite_cooks)) median(finite_cooks) else NULL,
+  action = "reported_not_excluded"
+)
 
 summary <- list(
   scenario_id = manifest$scenario_id,
@@ -108,6 +120,8 @@ summary <- list(
   design = "~ genotype",
   contrast = paste0(numerator, " vs ", reference),
   independent_filtering = FALSE,
+  cooks_cutoff = FALSE,
+  outlier_policy = "report_not_exclude",
   p_adjust_method = "BH",
   fdr_threshold = fdr,
   enrichment_effect_threshold_abs_log2fc = effect,
@@ -119,6 +133,7 @@ summary <- list(
   up_for_enrichment = sum(up),
   down_for_enrichment = sum(down),
   size_factors = as.list(setNames(as.numeric(sizeFactors(dds)), names(sizeFactors(dds)))),
+  cooks_distance_diagnostic = cooks_diag,
   analysis_lock_sha256 = lock$analysis_lock_sha256,
   dataset_freeze_sha256 = freeze$freeze_sha256,
   status = "PASS"
