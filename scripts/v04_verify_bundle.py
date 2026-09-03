@@ -33,6 +33,8 @@ def finite_float(value: str | None) -> float | None:
 
 
 def check_hash_map(items: dict[str, str], label: str) -> None:
+    if not items:
+        raise ScenarioError(f"analysis lock contains no {label} hashes")
     for relative, expected in items.items():
         path = ROOT / relative
         if not path.is_file():
@@ -74,7 +76,7 @@ def main() -> None:
     if marker.get("analysis_lock_sha256") != lock["analysis_lock_sha256"]:
         raise ScenarioError("marker/analysis-lock mismatch")
 
-    check_hash_map(lock.get("script_hashes", {}), "script")
+    check_hash_map(lock.get("script_hashes", {}), "code")
     check_hash_map(lock.get("environment_hashes", {}), "environment")
 
     for asset in freeze.get("assets", []):
@@ -102,6 +104,18 @@ def main() -> None:
     if enrichment.get("assembly") != build.assembly or enrichment.get("assembly_accession") != build.accession:
         raise ScenarioError("enrichment output is not bound to locked genome build")
 
+    analysis = manifest["analysis"]
+    if de_summary.get("independent_filtering") is not False or analysis.get("independent_filtering") is not False:
+        raise ScenarioError("independent filtering policy drifted")
+    if de_summary.get("cooks_cutoff") is not False or analysis.get("cooks_cutoff") is not False:
+        raise ScenarioError("Cook's-distance exclusion policy drifted")
+    if de_summary.get("outlier_policy") != "report_not_exclude" or analysis.get("outlier_policy") != "report_not_exclude":
+        raise ScenarioError("outlier handling policy drifted")
+    if de_summary.get("p_adjust_method") != "BH" or analysis.get("fdr_method") != "BH":
+        raise ScenarioError("multiple-testing policy drifted")
+    if not (run_dir / "r_session_info.txt").is_file():
+        raise ScenarioError("R session evidence is missing from final bundle")
+
     rows = read_csv(run_dir / "results" / "deseq2_all_genes.csv")
     if not rows:
         raise ScenarioError("DESeq2 tested-gene table is empty")
@@ -113,8 +127,15 @@ def main() -> None:
     if int(enrichment["background_genes"]) != len(rows):
         raise ScenarioError("enrichment background is not the locked tested-gene universe")
 
-    fdr = float(manifest["analysis"]["fdr_threshold"])
-    effect = float(manifest["analysis"]["effect_threshold_for_enrichment"])
+    fdr = float(analysis["fdr_threshold"])
+    effect = float(analysis["effect_threshold_for_enrichment"])
+    if float(de_summary["fdr_threshold"]) != fdr:
+        raise ScenarioError("DE FDR threshold differs from lock")
+    if float(de_summary["enrichment_effect_threshold_abs_log2fc"]) != effect:
+        raise ScenarioError("DE effect threshold differs from lock")
+    if float(enrichment["thresholds"]["padj"]) != fdr or float(enrichment["thresholds"]["abs_log2FoldChange"]) != effect:
+        raise ScenarioError("enrichment thresholds differ from lock")
+
     expected_up: set[str] = set()
     expected_down: set[str] = set()
     for row in rows:
@@ -126,6 +147,8 @@ def main() -> None:
             continue
         (expected_up if lfc > 0 else expected_down).add(row["Geneid"])
 
+    if int(de_summary["significant_for_enrichment"]) != len(expected_up | expected_down):
+        raise ScenarioError("DE summary significant-candidate count is inconsistent")
     if int(de_summary["up_for_enrichment"]) != len(expected_up):
         raise ScenarioError("DE summary up-candidate count is inconsistent")
     if int(de_summary["down_for_enrichment"]) != len(expected_down):
@@ -152,11 +175,12 @@ def main() -> None:
         "checks": {
             "dataset_bytes_and_hashes": "PASS",
             "pre_outcome_lock": "PASS",
-            "scripts_and_environments_unchanged": "PASS",
-            "fixed_prefilter_and_BH_policy": "PASS",
+            "transitive_code_and_environments_unchanged": "PASS",
+            "fixed_prefilter_BH_and_outlier_policy": "PASS",
             "candidate_reconstruction": "PASS",
             "custom_background_identity": "PASS",
             "genome_build_binding": "PASS",
+            "r_session_evidence": "PASS",
         },
         "claim_boundary": {
             "allowed": "Capability demonstration and exploratory genotype-associated transcriptomic differences in this public dataset.",
