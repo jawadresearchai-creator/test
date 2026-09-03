@@ -6,7 +6,7 @@ import json
 import math
 from pathlib import Path
 
-from agri_coscientist.annotation import BUILD_REGISTRY, EnsemblRestAdapter
+from agri_coscientist.annotation import AnnotationError, BUILD_REGISTRY, EnsemblRestAdapter
 from agri_coscientist.enrichment import GProfilerAdapter
 from agri_coscientist.scenario import ScenarioError
 
@@ -40,6 +40,29 @@ def write_results(path: Path, rows) -> None:
         for r in rows
     ]
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def resolve_build_sentinel(background: list[str], build):
+    adapter = EnsemblRestAdapter(user_agent="Agriculture-CoScientist-test/0.4")
+    failures: list[str] = []
+    # Some historical stable IDs can be retired in current Ensembl releases.
+    # Require at least one gene from the actual tested universe to resolve to the
+    # exact declared assembly, while recording failed candidates as provenance.
+    for gene_id in background[:50]:
+        try:
+            annotation = adapter.lookup(gene_id, build)
+        except Exception as exc:
+            failures.append(f"{gene_id}: {type(exc).__name__}")
+            continue
+        if annotation.assembly != build.assembly:
+            raise ScenarioError(
+                f"tested-gene sentinel {gene_id} resolved to {annotation.assembly}, expected {build.assembly}"
+            )
+        return annotation, failures
+    raise ScenarioError(
+        "none of the first 50 tested genes resolved against the locked Ensembl assembly; "
+        f"first failures: {failures[:5]}"
+    )
 
 
 def main() -> None:
@@ -78,12 +101,7 @@ def main() -> None:
     if not background:
         raise ScenarioError("enrichment background is empty")
 
-    # Exact-build sentinel check before functional interpretation. This uses a
-    # gene from the actual tested universe, not a hard-coded unrelated gene.
-    sentinel = background[0]
-    annotation = EnsemblRestAdapter(user_agent="Agriculture-CoScientist-test/0.4").lookup(sentinel, build)
-    if annotation.assembly != build.assembly:
-        raise ScenarioError("tested-gene sentinel does not resolve to locked assembly")
+    annotation, sentinel_failures = resolve_build_sentinel(background, build)
 
     fdr = float(manifest["analysis"]["fdr_threshold"])
     effect = float(manifest["analysis"]["effect_threshold_for_enrichment"])
@@ -133,9 +151,10 @@ def main() -> None:
         "assembly_accession": build.accession,
         "gprofiler_organism": build.gprofiler_organism,
         "tested_gene_sentinel": {
-            "gene_id": sentinel,
+            "gene_id": annotation.gene_id,
             "observed_assembly": annotation.assembly,
             "seq_region": annotation.seq_region,
+            "failed_candidates_before_success": sentinel_failures,
         },
         "background_genes": len(background),
         "background_definition": "all genes passing locked total-count prefilter",
