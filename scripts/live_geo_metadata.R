@@ -1,0 +1,10 @@
+suppressPackageStartupMessages(library(GEOquery))
+suppressPackageStartupMessages(library(jsonlite))
+# Small metadata-only live probe. It must not download SRA/FASTQ data.
+g <- getGEO("GSE183508", GSEMatrix=FALSE, getGPL=FALSE)
+meta <- Meta(g)
+stopifnot(identical(meta$geo_accession, "GSE183508"))
+stopifnot(grepl("wheat", meta$title, ignore.case=TRUE) || grepl("wheat", meta$summary, ignore.case=TRUE))
+out <- list(accession=meta$geo_accession, title=meta$title, samples=length(GSMList(g)))
+write_json(out, "live_geo_metadata.json", auto_unbox=TRUE, pretty=TRUE)
+cat(toJSON(out, auto_unbox=TRUE, pretty=TRUE), "\n")

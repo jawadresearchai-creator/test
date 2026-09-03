@@ -1,0 +1,11 @@
+{
+  "accession": "GSE183508",
+  "title": "Transcriptome profile of hypergravity-induced enhanced wheat root growth",
+  "organism": "Triticum aestivum",
+  "tissue": "root",
+  "design": "control vs 10g hypergravity for 12 h",
+  "replicates_per_group": 2,
+  "public_status_date": "2026-08-15",
+  "intended_test_use": "mechanistic-fit gate probe only; not adopted into a manuscript",
+  "expected_fitness_for_soil_compaction_question": "C_mechanistically_compatible"
+}

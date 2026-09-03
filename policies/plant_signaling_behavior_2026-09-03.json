@@ -1,0 +1,16 @@
+{
+  "journal": "Plant Signaling & Behavior",
+  "snapshot_date": "2026-09-03",
+  "source": "Taylor & Francis journal aims and scope",
+  "source_url": "https://www.tandfonline.com/journals/kpsb20/about-this-journal",
+  "accepts_original_research": true,
+  "configured_scope_terms": [
+    "signal perception",
+    "signal transduction",
+    "integrative plant physiology",
+    "plant communication",
+    "plant behavior",
+    "molecular biology"
+  ],
+  "note": "Scope snapshot for gate testing. Submission instructions require separate versioned retrieval."
+}
