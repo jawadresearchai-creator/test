@@ -18,10 +18,21 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.12.14'
           cache: pip
       - name: Install isolated kernel and tests
         run: python -m pip install --upgrade pip && python -m pip install -e '.[test]'
+      - name: Verify frozen Python package versions
+        run: |
+          python - <<'PY'
+          import importlib.metadata as md, json, platform
+          lock=json.load(open('environments/python-stack-lock.json'))
+          assert platform.python_version() == lock['python'], (platform.python_version(), lock['python'])
+          for package, expected in lock['packages'].items():
+              observed=md.version(package)
+              assert observed == expected, (package, observed, expected)
+          print('Frozen Python stack verified')
+          PY
       - name: Run full Python contract suite
         run: pytest -q
       - name: CLI smoke test
@@ -80,7 +91,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.12.14'
       - name: Install kernel for live repository adapter
         run: python -m pip install -e .
       - name: Download and hash a real public wheat GEO count file
