@@ -1,0 +1,10 @@
+{
+  "validated_at_utc": "2026-09-03T13:30:16Z",
+  "source_workflow_run_id": 33761375258,
+  "accession": "GSM7510647",
+  "url": "https://ftp.ncbi.nlm.nih.gov/geo/samples/GSM7510nnn/GSM7510647/suppl/GSM7510647_counts-Inquilab-91-roots.txt.gz",
+  "bytes": 892452,
+  "sha256": "e53005a6a1d64d941609d1101512c76a3749916a1dd196498ada20394d528ccd",
+  "first_line": "Geneid\tInquilab_91_rep1_root\tInquilab_91_rep3_root\tLength",
+  "artifact_digest": "sha256:5beb6db85bfc4670b8364155dde521fd8a2638c24fbebc972fc220146429d125"
+}
