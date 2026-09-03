@@ -1,0 +1,103 @@
+name: Agriculture CoScientist capability suite
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  python-kernel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install isolated kernel and tests
+        run: python -m pip install --upgrade pip && python -m pip install -e '.[test]'
+      - name: Run full Python contract suite
+        run: pytest -q
+      - name: CLI smoke test
+        run: python -m agri_coscientist > cli_output.json
+      - name: Verify package can run from outside repository cwd
+        run: |
+          cd /tmp
+          python -c "import agri_coscientist; print(agri_coscientist.__file__)"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: python-capability-evidence
+          path: cli_output.json
+          if-no-files-found: ignore
+
+  r-omics:
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: 'release'
+          use-public-rspm: true
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: |
+            any::jsonlite
+            any::WGCNA
+            bioc::DESeq2
+            bioc::edgeR
+            bioc::limma
+            bioc::GEOquery
+          dependencies: 'NA'
+          cache: always
+      - name: Run production-R capability smoke suite
+        run: Rscript scripts/r_omics_smoke.R
+      - name: Record R session
+        run: Rscript -e 'sessionInfo()' > r_session_info.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r-omics-capability-evidence
+          path: |
+            r_omics_smoke.json
+            r_session_info.txt
+          if-no-files-found: ignore
+
+  public-data-live:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Download and hash a real public wheat GEO count file
+        run: python scripts/live_geo_probe.py
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: 'release'
+          use-public-rspm: true
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: |
+            any::jsonlite
+            bioc::GEOquery
+          dependencies: 'NA'
+          cache: always
+      - name: Fetch current wheat GEO series metadata through GEOquery
+        run: Rscript scripts/live_geo_metadata.R
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: live-public-data-evidence
+          path: |
+            live_geo_probe.json
+            live_geo_metadata.json
+          if-no-files-found: ignore
