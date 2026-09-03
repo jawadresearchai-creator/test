@@ -143,9 +143,12 @@ class GProfilerAdapter:
         *,
         sources: tuple[str, ...] = ("GO:BP", "GO:MF", "GO:CC"),
         no_iea: bool = False,
+        user_threshold: float = 0.05,
     ) -> list[EnrichmentResult]:
         if not build.gprofiler_organism:
             raise EnrichmentError(f"no g:Profiler organism mapping for {build.assembly}")
+        if not (0.0 < float(user_threshold) <= 1.0):
+            raise ValueError("user_threshold must be in (0, 1]")
         query_list = list(dict.fromkeys(map(str, query)))
         background_list = list(dict.fromkeys(map(str, background)))
         if not query_list or not background_list:
@@ -160,6 +163,7 @@ class GProfilerAdapter:
             "domain_scope": "custom",
             "background": background_list,
             "significance_threshold_method": "fdr",
+            "user_threshold": float(user_threshold),
             "no_evidences": True,
             "no_iea": bool(no_iea),
         }
@@ -182,7 +186,7 @@ class GProfilerAdapter:
                 name=raw.get("name"),
                 source=raw.get("source"),
                 p_value=float(raw.get("p_value", 1.0)),
-                q_value=float(raw.get("p_value", 1.0)),  # API reports corrected p-value under chosen FDR method.
+                q_value=float(raw.get("p_value", 1.0)),  # corrected by selected FDR method
                 query_size=int(raw.get("query_size") or len(query_list)),
                 background_size=int(raw.get("effective_domain_size") or len(background_list)),
                 term_size=int(raw.get("term_size") or 0),
