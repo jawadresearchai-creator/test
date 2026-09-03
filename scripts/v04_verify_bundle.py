@@ -81,6 +81,7 @@ def main() -> None:
     de_summary = load_json(run_dir / "results" / "deseq2_summary.json")
     enrichment = load_json(run_dir / "results" / "enrichment" / "enrichment_summary.json")
     python_session = load_json(run_dir / "python_session_info.json")
+    r_session = load_json(run_dir / "r_session_info.json")
 
     if manifest.get("capability_only") is not True:
         raise ScenarioError("scenario lost capability-only boundary")
@@ -140,7 +141,7 @@ def main() -> None:
     if de_summary.get("p_adjust_method") != "BH" or analysis.get("fdr_method") != "BH":
         raise ScenarioError("multiple-testing policy drifted")
     if not (run_dir / "r_session_info.txt").is_file():
-        raise ScenarioError("R session evidence is missing from final bundle")
+        raise ScenarioError("human-readable R session evidence is missing from final bundle")
 
     python_lock = load_json(ROOT / "environments" / "python-stack-lock.json")
     if python_session.get("python") != python_lock.get("python"):
@@ -151,6 +152,18 @@ def main() -> None:
         raise ScenarioError("Python runtime evidence is bound to a different commit")
     if execution_context.get("github_run_id") is not None and python_session.get("github_run_id") != execution_context.get("github_run_id"):
         raise ScenarioError("Python runtime evidence is bound to a different workflow run")
+
+    r_lock = load_json(ROOT / "environments" / "v04-r-stack-lock.json")
+    if r_session.get("r") != r_lock.get("r"):
+        raise ScenarioError("executed R version differs from frozen v0.4 environment")
+    if r_session.get("packages") != r_lock.get("packages"):
+        raise ScenarioError("executed R package versions differ from frozen v0.4 environment")
+    if execution_context.get("github_sha") is not None and r_session.get("github_sha") != execution_context.get("github_sha"):
+        raise ScenarioError("R runtime evidence is bound to a different commit")
+    if execution_context.get("github_run_id") is not None and r_session.get("github_run_id") != execution_context.get("github_run_id"):
+        raise ScenarioError("R runtime evidence is bound to a different workflow run")
+    if execution_context.get("github_run_attempt") is not None and r_session.get("github_run_attempt") != execution_context.get("github_run_attempt"):
+        raise ScenarioError("R runtime evidence is bound to a different workflow attempt")
 
     rows = read_csv(run_dir / "results" / "deseq2_all_genes.csv")
     if not rows:
@@ -214,7 +227,8 @@ def main() -> None:
             "pre_outcome_lock": "PASS",
             "exact_github_execution_context": "PASS",
             "transitive_code_and_environments_unchanged": "PASS",
-            "runtime_environment_evidence": "PASS",
+            "python_runtime_environment_evidence": "PASS",
+            "r_runtime_environment_evidence": "PASS",
             "fixed_prefilter_BH_and_outlier_policy": "PASS",
             "candidate_reconstruction": "PASS",
             "custom_background_identity": "PASS",
