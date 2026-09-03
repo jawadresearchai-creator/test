@@ -83,6 +83,10 @@ def validate_scenario_manifest(manifest: Mapping) -> None:
         raise ScenarioError("v0.4 prefilter is locked at total count >= 10")
     if analysis.get("independent_filtering") is not False:
         raise ScenarioError("v0.4 requires DESeq2 independent filtering disabled")
+    if analysis.get("cooks_cutoff") is not False:
+        raise ScenarioError("v0.4 requires Cook's-distance result exclusion disabled")
+    if analysis.get("outlier_policy") != "report_not_exclude":
+        raise ScenarioError("v0.4 outlier policy is report_not_exclude")
     if analysis.get("fdr_method") != "BH" or float(analysis.get("fdr_threshold", 2)) != 0.05:
         raise ScenarioError("v0.4 FDR policy must be BH at 0.05")
     if float(analysis.get("effect_threshold_for_enrichment", -1)) != 1.0:
