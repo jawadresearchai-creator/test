@@ -1,6 +1,7 @@
 name: v0.4 real public omics capability
 
 on:
+  workflow_call:
   workflow_dispatch:
     inputs:
       execute_real_public_omics:
@@ -13,12 +14,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: v04-real-public-omics
+  group: v04-real-public-omics-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   real-public-omics:
-    if: ${{ inputs.execute_real_public_omics == true }}
+    if: ${{ github.event_name == 'workflow_call' || inputs.execute_real_public_omics == true }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
