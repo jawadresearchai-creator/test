@@ -67,6 +67,23 @@ jobs:
       - name: Freeze public count assets and create pre-outcome Analysis Lock
         run: python scripts/v04_prepare_scenario.py --run-dir "$RUN_DIR"
 
+      - name: Record Python runtime evidence
+        run: |
+          python - <<'PY'
+          import importlib.metadata as md, json, os, platform
+          lock=json.load(open('environments/python-stack-lock.json'))
+          report={
+            'python': platform.python_version(),
+            'platform': platform.platform(),
+            'packages': {p: md.version(p) for p in lock['packages']},
+            'github_sha': os.environ.get('GITHUB_SHA'),
+            'github_run_id': os.environ.get('GITHUB_RUN_ID'),
+          }
+          with open(os.path.join(os.environ['RUN_DIR'], 'python_session_info.json'), 'w') as fh:
+              json.dump(report, fh, indent=2, sort_keys=True)
+              fh.write('\n')
+          PY
+
       - name: Execute locked DESeq2 analysis on real public counts
         run: Rscript scripts/v04_real_de.R "$RUN_DIR"
 
