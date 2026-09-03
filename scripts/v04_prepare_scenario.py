@@ -30,6 +30,7 @@ LOCKED_CODE_FILES = (
     "src/agri_coscientist/annotation.py",
     "src/agri_coscientist/enrichment.py",
     "pyproject.toml",
+    ".github/workflows/capability.yml",
     ".github/workflows/v04-real-public-omics.yml",
 )
 ENV_FILES = (
