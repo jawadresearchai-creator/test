@@ -1,0 +1,34 @@
+{
+  "validated_at_utc": "2026-09-03T14:05:29Z",
+  "sentinel_gene": "TraesCS1D03G0909900",
+  "genome": {
+    "species": "Triticum aestivum",
+    "assembly": "IWGSC_RefSeq_v2.1",
+    "accession": "GCA_018294505.1",
+    "ensembl_plants_reference_release": "63"
+  },
+  "ensembl_rest": {
+    "assembly": "IWGSC_RefSeq_v2.1",
+    "seq_region": "1D",
+    "start": 464844142,
+    "end": 464845692,
+    "biotype": "protein_coding"
+  },
+  "gprofiler": {
+    "organism": "tarefseqv2",
+    "display_name": "Triticum aestivum Refseqv2",
+    "taxonomy_id": "4565",
+    "genebuild": "IWGSC_RefSeq_v2.1",
+    "biomart": "EnsemblPlants",
+    "biomart_version": "59",
+    "gprofiler_version": "e114_eg59_p19_27110d83",
+    "go_class_release": "2026-01-23"
+  },
+  "policy": {
+    "assembly_match_is_hard_gate": true,
+    "functional_annotation_release_is_recorded_separately": true,
+    "provider_version_drift_requires_revalidation": true,
+    "custom_background_required_for_study_specific_enrichment": true,
+    "multiple_testing_default": "Benjamini-Hochberg FDR"
+  }
+}

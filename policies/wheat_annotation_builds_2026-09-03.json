@@ -1,0 +1,18 @@
+{
+  "snapshot_date": "2026-09-03",
+  "builds": [
+    {
+      "species": "Triticum aestivum",
+      "assembly": "IWGSC_RefSeq_v2.1",
+      "insdc_accession": "GCA_018294505.1",
+      "ensembl_plants_species": "Triticum_aestivum_refseqv2",
+      "ensembl_plants_release": "63",
+      "ensembl_plants_release_date": "June 2026",
+      "gprofiler_organism": "tarefseqv2",
+      "gprofiler_assembly_label": "IWGSC_RefSeq_v2.1",
+      "gramene_release": "69",
+      "status": "supported-test-build"
+    }
+  ],
+  "policy": "Annotation and enrichment MUST declare an exact genome/annotation build. Cross-build mappings are rejected unless a separately versioned liftover or stable-ID migration step is explicitly approved and provenance-locked."
+}

@@ -11,6 +11,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: agriculture-coscientist-capability-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   python-kernel:
     runs-on: ubuntu-latest
@@ -119,4 +123,23 @@ jobs:
             live_geo_probe.json
             live_geo_adapter.json
             live_geo_metadata.json
+          if-no-files-found: ignore
+
+  annotation-enrichment-live:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.14'
+          cache: pip
+      - name: Install annotation/enrichment kernel
+        run: python -m pip install -e .
+      - name: Exercise build-aware Ensembl and g:Profiler adapters
+        run: python scripts/live_wheat_annotation_enrichment.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: live-wheat-annotation-enrichment-evidence
+          path: live_wheat_annotation_enrichment.json
           if-no-files-found: ignore
