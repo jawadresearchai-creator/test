@@ -20,15 +20,20 @@ from agri_coscientist.scenario import (
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / "scenarios" / "gse235844_rawal87_vs_sonalika_roots.json"
-SCRIPT_FILES = (
+LOCKED_CODE_FILES = (
     "scripts/v04_prepare_scenario.py",
     "scripts/v04_real_de.R",
     "scripts/v04_enrich.py",
     "scripts/v04_verify_bundle.py",
+    "src/agri_coscientist/scenario.py",
+    "src/agri_coscientist/annotation.py",
+    "src/agri_coscientist/enrichment.py",
+    "pyproject.toml",
+    ".github/workflows/v04-real-public-omics.yml",
 )
 ENV_FILES = (
     "environments/python-stack-lock.json",
-    "environments/r-stack-lock.json",
+    "environments/v04-r-stack-lock.json",
 )
 
 
@@ -68,7 +73,7 @@ def prepare(manifest_path: Path, run_dir: Path) -> tuple[dict, dict]:
     frozen_assets: list[FrozenAsset] = []
     asset_paths: dict[str, str] = {}
 
-    # Pre-outcome boundary: only compressed bytes and the first/header line are
+    # Pre-outcome boundary: compressed bytes and only the first/header line are
     # inspected here. No gene-level count rows or differential outcomes are read.
     for asset in manifest["dataset"]["assets"]:
         asset_id = asset["asset_id"]
@@ -100,12 +105,12 @@ def prepare(manifest_path: Path, run_dir: Path) -> tuple[dict, dict]:
     run_manifest = run_dir / "manifest.json"
     run_manifest.write_bytes(manifest_path.read_bytes())
 
-    script_hashes = _hash_repo_files(SCRIPT_FILES)
+    code_hashes = _hash_repo_files(LOCKED_CODE_FILES)
     environment_hashes = _hash_repo_files(ENV_FILES)
     analysis_lock = build_analysis_lock(
         manifest,
         dataset_freeze,
-        script_hashes,
+        code_hashes,
         environment_hashes,
     )
     analysis_lock["manifest_sha256"] = file_sha256(run_manifest)
