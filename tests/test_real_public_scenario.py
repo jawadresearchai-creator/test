@@ -29,6 +29,12 @@ def _gz(text: str) -> bytes:
     return out.getvalue()
 
 
+def _bad_analysis(key, value):
+    bad = json.loads(json.dumps(MANIFEST))
+    bad["analysis"][key] = value
+    return bad
+
+
 def test_iwgsc_v1_and_refseq_v2_are_distinct_registered_builds():
     assert WHEAT_IWGSC_V1.assembly == "IWGSC"
     assert WHEAT_IWGSC_V1.accession == "GCA_900519105.1"
@@ -40,6 +46,7 @@ def test_real_scenario_is_capability_only_and_count_based():
     validate_scenario_manifest(MANIFEST)
     assert MANIFEST["capability_only"] is True
     assert MANIFEST["dataset"]["representation"] == "featurecounts_integer_counts"
+    assert MANIFEST["analysis"]["independent_filtering"] is False
 
 
 def test_normalized_expression_cannot_masquerade_as_deseq_counts():
@@ -54,6 +61,27 @@ def test_less_than_three_replicates_is_rejected():
     bad["contrast"]["groups"][0]["expected_replicates"] = 2
     with pytest.raises(ScenarioError):
         validate_scenario_manifest(bad)
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("design", "~ 1"),
+        ("prefilter_total_count", 5),
+        ("independent_filtering", True),
+        ("fdr_method", "bonferroni"),
+        ("fdr_threshold", 0.1),
+        ("effect_threshold_for_enrichment", 0.5),
+        ("enrichment_direction", "combined"),
+        ("enrichment_background", "all_wheat_genes"),
+        ("enrichment_provider", "other"),
+        ("enrichment_domain_scope", "annotated"),
+        ("enrichment_correction", "bonferroni"),
+    ],
+)
+def test_locked_analysis_policy_cannot_be_weakened(key, value):
+    with pytest.raises(ScenarioError):
+        validate_scenario_manifest(_bad_analysis(key, value))
 
 
 def test_featurecounts_header_requires_exact_replicate_count():
@@ -86,7 +114,17 @@ def test_analysis_lock_changes_when_prespecified_threshold_changes():
     lock1 = build_analysis_lock(MANIFEST, freeze, {"de.R": "1" * 64}, {"r": "2" * 64})
     altered = json.loads(json.dumps(MANIFEST))
     altered["analysis"]["effect_threshold_for_enrichment"] = 0.5
-    lock2 = build_analysis_lock(altered, freeze, {"de.R": "1" * 64}, {"r": "2" * 64})
+    # Build lock calls the validator, so post-hoc weakening is rejected rather than merely re-hashed.
+    with pytest.raises(ScenarioError):
+        build_analysis_lock(altered, freeze, {"de.R": "1" * 64}, {"r": "2" * 64})
+
+
+def test_analysis_lock_changes_when_code_hash_changes():
+    a = FrozenAsset("Rawal-87_roots", "https://example/a.gz", "a" * 64, 100, ("Geneid", "r1", "r2", "r3", "Length"))
+    b = FrozenAsset("Sonalika_roots", "https://example/b.gz", "b" * 64, 120, ("Geneid", "s1", "s2", "s3", "Length"))
+    freeze = build_dataset_freeze(MANIFEST, [a, b])
+    lock1 = build_analysis_lock(MANIFEST, freeze, {"de.R": "1" * 64}, {"r": "2" * 64})
+    lock2 = build_analysis_lock(MANIFEST, freeze, {"de.R": "3" * 64}, {"r": "2" * 64})
     assert lock1["analysis_lock_sha256"] != lock2["analysis_lock_sha256"]
 
 
