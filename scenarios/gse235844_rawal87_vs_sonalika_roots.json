@@ -42,6 +42,7 @@
     "de_method": "DESeq2",
     "design": "~ genotype",
     "prefilter_total_count": 10,
+    "independent_filtering": false,
     "fdr_method": "BH",
     "fdr_threshold": 0.05,
     "effect_threshold_for_enrichment": 1.0,
