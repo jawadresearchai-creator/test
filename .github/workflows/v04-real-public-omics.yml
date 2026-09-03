@@ -73,12 +73,11 @@ jobs:
       - name: Execute exact-build custom-background enrichment
         run: python scripts/v04_enrich.py "$RUN_DIR"
 
+      - name: Record R session before final bundle audit
+        run: Rscript -e 'sessionInfo()' > "$RUN_DIR/r_session_info.txt"
+
       - name: Run hostile provenance and scientific bundle audit
         run: python scripts/v04_verify_bundle.py "$RUN_DIR"
-
-      - name: Record R session
-        if: always()
-        run: Rscript -e 'sessionInfo()' > "$RUN_DIR/r_session_info.txt" || true
 
       - uses: actions/upload-artifact@v4
         if: always()
