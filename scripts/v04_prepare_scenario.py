@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import urllib.request
 from pathlib import Path
@@ -59,6 +60,18 @@ def _hash_repo_files(paths: tuple[str, ...]) -> dict[str, str]:
     return hashes
 
 
+def execution_context() -> dict:
+    return {
+        "github_sha": os.environ.get("GITHUB_SHA"),
+        "github_run_id": os.environ.get("GITHUB_RUN_ID"),
+        "github_run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
+        "github_workflow": os.environ.get("GITHUB_WORKFLOW"),
+        "github_workflow_ref": os.environ.get("GITHUB_WORKFLOW_REF"),
+        "github_repository": os.environ.get("GITHUB_REPOSITORY"),
+        "github_ref": os.environ.get("GITHUB_REF"),
+    }
+
+
 def prepare(manifest_path: Path, run_dir: Path) -> tuple[dict, dict]:
     manifest = json.loads(manifest_path.read_text())
     validate_scenario_manifest(manifest)
@@ -114,6 +127,7 @@ def prepare(manifest_path: Path, run_dir: Path) -> tuple[dict, dict]:
         environment_hashes,
     )
     analysis_lock["manifest_sha256"] = file_sha256(run_manifest)
+    analysis_lock["execution_context"] = execution_context()
     lock_without_hash = {k: v for k, v in analysis_lock.items() if k != "analysis_lock_sha256"}
     analysis_lock["analysis_lock_sha256"] = canonical_hash(lock_without_hash)
     (run_dir / "analysis_lock.json").write_text(
@@ -124,6 +138,7 @@ def prepare(manifest_path: Path, run_dir: Path) -> tuple[dict, dict]:
         "scenario_id": manifest["scenario_id"],
         "dataset_freeze_sha256": dataset_freeze["freeze_sha256"],
         "analysis_lock_sha256": analysis_lock["analysis_lock_sha256"],
+        "execution_context": analysis_lock["execution_context"],
         "pre_outcome_boundary": "COMPLETE",
         "count_rows_inspected": False,
     }
@@ -142,6 +157,7 @@ def main() -> None:
     print(json.dumps({
         "dataset_freeze_sha256": freeze["freeze_sha256"],
         "analysis_lock_sha256": lock["analysis_lock_sha256"],
+        "execution_context": lock["execution_context"],
         "status": "PRE_OUTCOME_LOCK_COMPLETE",
     }, indent=2))
 
