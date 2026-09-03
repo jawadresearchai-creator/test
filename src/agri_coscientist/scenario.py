@@ -77,12 +77,24 @@ def validate_scenario_manifest(manifest: Mapping) -> None:
         if int(group.get("expected_replicates", 0)) < 3:
             raise ScenarioError("each comparison group requires at least three biological replicates")
     analysis = manifest["analysis"]
-    if analysis.get("de_method") != "DESeq2":
-        raise ScenarioError("v0.4 confirmatory DE method is pre-specified as DESeq2")
-    if analysis.get("fdr_method") != "BH" or float(analysis.get("fdr_threshold", 2)) != 0.05:
-        raise ScenarioError("v0.4 FDR policy must be BH at 0.05")
+    if analysis.get("de_method") != "DESeq2" or analysis.get("design") != "~ genotype":
+        raise ScenarioError("v0.4 confirmatory DE method/design is locked to DESeq2 with ~ genotype")
     if int(analysis.get("prefilter_total_count", -1)) != 10:
         raise ScenarioError("v0.4 prefilter is locked at total count >= 10")
+    if analysis.get("independent_filtering") is not False:
+        raise ScenarioError("v0.4 requires DESeq2 independent filtering disabled")
+    if analysis.get("fdr_method") != "BH" or float(analysis.get("fdr_threshold", 2)) != 0.05:
+        raise ScenarioError("v0.4 FDR policy must be BH at 0.05")
+    if float(analysis.get("effect_threshold_for_enrichment", -1)) != 1.0:
+        raise ScenarioError("v0.4 enrichment effect threshold is locked at |log2FC| >= 1")
+    if analysis.get("enrichment_direction") != "separate_up_down":
+        raise ScenarioError("v0.4 enrichment must keep up/down genes separate")
+    if analysis.get("enrichment_background") != "all_genes_passing_locked_prefilter":
+        raise ScenarioError("v0.4 enrichment background must be the locked tested-gene universe")
+    if analysis.get("enrichment_provider") != "g:Profiler":
+        raise ScenarioError("v0.4 enrichment provider is locked to g:Profiler")
+    if analysis.get("enrichment_domain_scope") != "custom" or analysis.get("enrichment_correction") != "fdr":
+        raise ScenarioError("v0.4 enrichment requires custom background with FDR correction")
 
 
 def build_dataset_freeze(manifest: Mapping, assets: Iterable[FrozenAsset]) -> dict:
