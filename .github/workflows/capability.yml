@@ -17,6 +17,7 @@ concurrency:
 
 jobs:
   python-kernel:
+    if: ${{ github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/feature/v0.4-real-public-omics' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -53,6 +54,7 @@ jobs:
           if-no-files-found: ignore
 
   r-omics:
+    if: ${{ github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/feature/v0.4-real-public-omics' }}
     runs-on: ubuntu-latest
     env:
       GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
@@ -90,6 +92,7 @@ jobs:
           if-no-files-found: ignore
 
   public-data-live:
+    if: ${{ github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/feature/v0.4-real-public-omics' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -126,6 +129,7 @@ jobs:
           if-no-files-found: ignore
 
   annotation-enrichment-live:
+    if: ${{ github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/feature/v0.4-real-public-omics' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -143,3 +147,8 @@ jobs:
           name: live-wheat-annotation-enrichment-evidence
           path: live_wheat_annotation_enrichment.json
           if-no-files-found: ignore
+
+  v04-real-public-omics:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/feature/v0.4-real-public-omics' }}
+    uses: ./.github/workflows/v04-real-public-omics.yml
+    secrets: inherit
