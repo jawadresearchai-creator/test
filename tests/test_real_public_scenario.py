@@ -47,6 +47,8 @@ def test_real_scenario_is_capability_only_and_count_based():
     assert MANIFEST["capability_only"] is True
     assert MANIFEST["dataset"]["representation"] == "featurecounts_integer_counts"
     assert MANIFEST["analysis"]["independent_filtering"] is False
+    assert MANIFEST["analysis"]["cooks_cutoff"] is False
+    assert MANIFEST["analysis"]["outlier_policy"] == "report_not_exclude"
 
 
 def test_normalized_expression_cannot_masquerade_as_deseq_counts():
@@ -69,6 +71,8 @@ def test_less_than_three_replicates_is_rejected():
         ("design", "~ 1"),
         ("prefilter_total_count", 5),
         ("independent_filtering", True),
+        ("cooks_cutoff", True),
+        ("outlier_policy", "exclude"),
         ("fdr_method", "bonferroni"),
         ("fdr_threshold", 0.1),
         ("effect_threshold_for_enrichment", 0.5),
@@ -107,14 +111,12 @@ def test_dataset_freeze_and_analysis_lock_are_deterministic_and_separate():
     assert lock1["analysis_lock_sha256"] != freeze1["freeze_sha256"]
 
 
-def test_analysis_lock_changes_when_prespecified_threshold_changes():
+def test_analysis_lock_rejects_prespecified_threshold_change():
     a = FrozenAsset("Rawal-87_roots", "https://example/a.gz", "a" * 64, 100, ("Geneid", "r1", "r2", "r3", "Length"))
     b = FrozenAsset("Sonalika_roots", "https://example/b.gz", "b" * 64, 120, ("Geneid", "s1", "s2", "s3", "Length"))
     freeze = build_dataset_freeze(MANIFEST, [a, b])
-    lock1 = build_analysis_lock(MANIFEST, freeze, {"de.R": "1" * 64}, {"r": "2" * 64})
     altered = json.loads(json.dumps(MANIFEST))
     altered["analysis"]["effect_threshold_for_enrichment"] = 0.5
-    # Build lock calls the validator, so post-hoc weakening is rejected rather than merely re-hashed.
     with pytest.raises(ScenarioError):
         build_analysis_lock(altered, freeze, {"de.R": "1" * 64}, {"r": "2" * 64})
 
