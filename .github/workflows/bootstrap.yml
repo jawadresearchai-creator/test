@@ -16,17 +16,16 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Expand source-only bundle
+      - name: Expand source-only bundle without changing workflows
         shell: bash
         run: |
           set -euo pipefail
           cat bootstrap/chunk00 bootstrap/chunk01 bootstrap/chunk02 | base64 -d > /tmp/test.zip
           unzip -q /tmp/test.zip -d /tmp/expanded
-          cp -a /tmp/expanded/test/. .
+          find /tmp/expanded/test -mindepth 1 -maxdepth 1 ! -name .github -exec cp -a {} . \;
           rm -rf bootstrap
-          rm -f .github/workflows/bootstrap.yml
           test -f pyproject.toml
-          test -f .github/workflows/capability.yml
+          test -f scripts/r_omics_smoke.R
           python - <<'PY'
           import hashlib
           print('bundle_sha256=' + hashlib.sha256(open('/tmp/test.zip','rb').read()).hexdigest())
