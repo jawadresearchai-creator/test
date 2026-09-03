@@ -11,6 +11,7 @@ from agri_coscientist.scenario import (
     ScenarioError,
     build_analysis_lock,
     build_dataset_freeze,
+    canonical_hash,
     file_sha256,
     read_gzip_header_bytes,
     validate_featurecounts_header,
@@ -20,6 +21,7 @@ from agri_coscientist.scenario import (
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / "scenarios" / "gse235844_rawal87_vs_sonalika_roots.json"
 SCRIPT_FILES = (
+    "scripts/v04_prepare_scenario.py",
     "scripts/v04_real_de.R",
     "scripts/v04_enrich.py",
     "scripts/v04_verify_bundle.py",
@@ -88,13 +90,15 @@ def prepare(manifest_path: Path, run_dir: Path) -> tuple[dict, dict]:
 
     dataset_freeze = build_dataset_freeze(manifest, frozen_assets)
     dataset_freeze["asset_paths"] = asset_paths
-    # Recompute because asset paths are also part of the immutable local run record.
     freeze_without_hash = {k: v for k, v in dataset_freeze.items() if k != "freeze_sha256"}
-    from agri_coscientist.scenario import canonical_hash
     dataset_freeze["freeze_sha256"] = canonical_hash(freeze_without_hash)
     (run_dir / "dataset_freeze.json").write_text(
         json.dumps(dataset_freeze, indent=2, sort_keys=True) + "\n"
     )
+
+    # Preserve the exact manifest bytes that are hashed into the lock.
+    run_manifest = run_dir / "manifest.json"
+    run_manifest.write_bytes(manifest_path.read_bytes())
 
     script_hashes = _hash_repo_files(SCRIPT_FILES)
     environment_hashes = _hash_repo_files(ENV_FILES)
@@ -104,14 +108,12 @@ def prepare(manifest_path: Path, run_dir: Path) -> tuple[dict, dict]:
         script_hashes,
         environment_hashes,
     )
-    analysis_lock["manifest_sha256"] = file_sha256(manifest_path)
-    # Include the final lock hash after adding the manifest hash.
+    analysis_lock["manifest_sha256"] = file_sha256(run_manifest)
     lock_without_hash = {k: v for k, v in analysis_lock.items() if k != "analysis_lock_sha256"}
     analysis_lock["analysis_lock_sha256"] = canonical_hash(lock_without_hash)
     (run_dir / "analysis_lock.json").write_text(
         json.dumps(analysis_lock, indent=2, sort_keys=True) + "\n"
     )
-    (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 
     marker = {
         "scenario_id": manifest["scenario_id"],
