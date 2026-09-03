@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import math
+import os
 from pathlib import Path
 
 from agri_coscientist.annotation import BUILD_REGISTRY
@@ -44,6 +45,29 @@ def check_hash_map(items: dict[str, str], label: str) -> None:
             raise ScenarioError(f"{label} drift: {relative}: {observed} != {expected}")
 
 
+def check_execution_context(lock: dict, marker: dict) -> dict:
+    locked = lock.get("execution_context") or {}
+    if marker.get("execution_context") != locked:
+        raise ScenarioError("pre-outcome marker execution context differs from Analysis Lock")
+    expected_repo = "jawadresearchai-creator/test"
+    if locked.get("github_repository") not in (None, expected_repo):
+        raise ScenarioError(f"Analysis Lock belongs to unexpected repository: {locked.get('github_repository')}")
+    current = {
+        "github_sha": os.environ.get("GITHUB_SHA"),
+        "github_run_id": os.environ.get("GITHUB_RUN_ID"),
+        "github_run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
+        "github_workflow": os.environ.get("GITHUB_WORKFLOW"),
+        "github_workflow_ref": os.environ.get("GITHUB_WORKFLOW_REF"),
+        "github_repository": os.environ.get("GITHUB_REPOSITORY"),
+        "github_ref": os.environ.get("GITHUB_REF"),
+    }
+    for key, observed in current.items():
+        expected = locked.get(key)
+        if observed is not None and expected != observed:
+            raise ScenarioError(f"execution-context drift for {key}: {observed!r} != {expected!r}")
+    return locked
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("run_dir", type=Path)
@@ -56,6 +80,7 @@ def main() -> None:
     marker = load_json(run_dir / "PRE_OUTCOME_LOCK_COMPLETE.json")
     de_summary = load_json(run_dir / "results" / "deseq2_summary.json")
     enrichment = load_json(run_dir / "results" / "enrichment" / "enrichment_summary.json")
+    python_session = load_json(run_dir / "python_session_info.json")
 
     if manifest.get("capability_only") is not True:
         raise ScenarioError("scenario lost capability-only boundary")
@@ -75,6 +100,7 @@ def main() -> None:
         raise ScenarioError("marker/dataset-freeze mismatch")
     if marker.get("analysis_lock_sha256") != lock["analysis_lock_sha256"]:
         raise ScenarioError("marker/analysis-lock mismatch")
+    execution_context = check_execution_context(lock, marker)
 
     check_hash_map(lock.get("script_hashes", {}), "code")
     check_hash_map(lock.get("environment_hashes", {}), "environment")
@@ -115,6 +141,16 @@ def main() -> None:
         raise ScenarioError("multiple-testing policy drifted")
     if not (run_dir / "r_session_info.txt").is_file():
         raise ScenarioError("R session evidence is missing from final bundle")
+
+    python_lock = load_json(ROOT / "environments" / "python-stack-lock.json")
+    if python_session.get("python") != python_lock.get("python"):
+        raise ScenarioError("executed Python version differs from frozen environment")
+    if python_session.get("packages") != python_lock.get("packages"):
+        raise ScenarioError("executed Python package versions differ from frozen environment")
+    if execution_context.get("github_sha") is not None and python_session.get("github_sha") != execution_context.get("github_sha"):
+        raise ScenarioError("Python runtime evidence is bound to a different commit")
+    if execution_context.get("github_run_id") is not None and python_session.get("github_run_id") != execution_context.get("github_run_id"):
+        raise ScenarioError("Python runtime evidence is bound to a different workflow run")
 
     rows = read_csv(run_dir / "results" / "deseq2_all_genes.csv")
     if not rows:
@@ -168,6 +204,7 @@ def main() -> None:
         "capability_only": True,
         "dataset_freeze_sha256": freeze["freeze_sha256"],
         "analysis_lock_sha256": lock["analysis_lock_sha256"],
+        "execution_context": execution_context,
         "genome_build": {"assembly": build.assembly, "accession": build.accession},
         "tested_genes": len(rows),
         "up_candidates": len(expected_up),
@@ -175,12 +212,13 @@ def main() -> None:
         "checks": {
             "dataset_bytes_and_hashes": "PASS",
             "pre_outcome_lock": "PASS",
+            "exact_github_execution_context": "PASS",
             "transitive_code_and_environments_unchanged": "PASS",
+            "runtime_environment_evidence": "PASS",
             "fixed_prefilter_BH_and_outlier_policy": "PASS",
             "candidate_reconstruction": "PASS",
             "custom_background_identity": "PASS",
             "genome_build_binding": "PASS",
-            "r_session_evidence": "PASS",
         },
         "claim_boundary": {
             "allowed": "Capability demonstration and exploratory genotype-associated transcriptomic differences in this public dataset.",
@@ -204,6 +242,7 @@ def main() -> None:
         "scenario_id": manifest["scenario_id"],
         "analysis_lock_sha256": lock["analysis_lock_sha256"],
         "dataset_freeze_sha256": freeze["freeze_sha256"],
+        "execution_context": execution_context,
         "files": bundle_files,
         "status": "PASS",
     }
