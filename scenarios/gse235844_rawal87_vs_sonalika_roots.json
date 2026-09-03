@@ -43,6 +43,8 @@
     "design": "~ genotype",
     "prefilter_total_count": 10,
     "independent_filtering": false,
+    "cooks_cutoff": false,
+    "outlier_policy": "report_not_exclude",
     "fdr_method": "BH",
     "fdr_threshold": 0.05,
     "effect_threshold_for_enrichment": 1.0,
@@ -58,6 +60,7 @@
     "non-integer or negative counts",
     "mixed or unknown wheat assembly",
     "query genes outside enrichment background",
-    "outcome-dependent threshold changes after analysis lock"
+    "outcome-dependent threshold changes after analysis lock",
+    "silent outcome-dependent gene exclusion"
   ]
 }
