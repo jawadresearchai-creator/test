@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from agri_coscientist.annotation import GrameneEnsemblAdapter, WHEAT_REFSEQ_V2
+from agri_coscientist.annotation import EnsemblRestAdapter, WHEAT_REFSEQ_V2
 from agri_coscientist.enrichment import GProfilerAdapter
 
 OUT = Path("live_wheat_annotation_enrichment.json")
@@ -11,7 +11,7 @@ SENTINEL = "TraesCS1D03G0909900"
 
 
 def main() -> None:
-    annotation = GrameneEnsemblAdapter().lookup(SENTINEL, WHEAT_REFSEQ_V2)
+    annotation = EnsemblRestAdapter().lookup(SENTINEL, WHEAT_REFSEQ_V2)
     if annotation.assembly != WHEAT_REFSEQ_V2.assembly:
         raise RuntimeError((annotation.assembly, WHEAT_REFSEQ_V2.assembly))
     if annotation.species.lower() != WHEAT_REFSEQ_V2.species.lower():
@@ -22,9 +22,6 @@ def main() -> None:
     if not versions:
         raise RuntimeError("g:Profiler returned no data-version metadata")
 
-    # This is a provider/schema capability probe, not a biological claim.
-    # A threshold of 1.0 ensures valid annotated terms are returned even when
-    # this one-gene sentinel is not statistically enriched.
     enrichment = gp.profile(
         [SENTINEL],
         [SENTINEL],
@@ -39,9 +36,10 @@ def main() -> None:
             "species": WHEAT_REFSEQ_V2.species,
             "assembly": WHEAT_REFSEQ_V2.assembly,
             "accession": WHEAT_REFSEQ_V2.accession,
+            "provider_release": WHEAT_REFSEQ_V2.provider_release,
             "gprofiler_organism": WHEAT_REFSEQ_V2.gprofiler_organism,
         },
-        "gramene": {
+        "ensembl_rest": {
             "gene_id": annotation.gene_id,
             "species": annotation.species,
             "assembly": annotation.assembly,
