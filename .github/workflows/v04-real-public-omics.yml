@@ -84,14 +84,27 @@ jobs:
               fh.write('\n')
           PY
 
+      - name: Record R runtime evidence
+        run: |
+          Rscript - <<'RS'
+          lock <- jsonlite::fromJSON('environments/v04-r-stack-lock.json')
+          report <- list(
+            r = as.character(getRversion()),
+            platform = R.version$platform,
+            packages = as.list(setNames(vapply(names(lock$packages), function(p) as.character(packageVersion(p)), character(1)), names(lock$packages))),
+            github_sha = Sys.getenv('GITHUB_SHA', unset = NA_character_),
+            github_run_id = Sys.getenv('GITHUB_RUN_ID', unset = NA_character_),
+            github_run_attempt = Sys.getenv('GITHUB_RUN_ATTEMPT', unset = NA_character_)
+          )
+          jsonlite::write_json(report, file.path(Sys.getenv('RUN_DIR'), 'r_session_info.json'), pretty = TRUE, auto_unbox = TRUE, null = 'null')
+          writeLines(capture.output(sessionInfo()), file.path(Sys.getenv('RUN_DIR'), 'r_session_info.txt'))
+          RS
+
       - name: Execute locked DESeq2 analysis on real public counts
         run: Rscript scripts/v04_real_de.R "$RUN_DIR"
 
       - name: Execute exact-build custom-background enrichment
         run: python scripts/v04_enrich.py "$RUN_DIR"
-
-      - name: Record R session before final bundle audit
-        run: Rscript -e 'sessionInfo()' > "$RUN_DIR/r_session_info.txt"
 
       - name: Run hostile provenance and scientific bundle audit
         run: python scripts/v04_verify_bundle.py "$RUN_DIR"
