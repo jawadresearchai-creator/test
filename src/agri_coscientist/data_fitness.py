@@ -53,11 +53,7 @@ class DataFitnessDimension(str, Enum):
 
 @dataclass(frozen=True)
 class DataFitnessPolicy:
-    """Predeclared General-G3 thresholds.
-
-    These capability-test defaults are not universal scientific constants. A
-    production project may supply a stricter policy before outcome use.
-    """
+    """Predeclared General-G3 thresholds; project policy may be stricter."""
 
     min_primary_coverage: float = 0.95
     min_supporting_coverage: float = 0.80
@@ -67,14 +63,15 @@ class DataFitnessPolicy:
     min_supporting_join_fraction: float = 0.85
 
     def __post_init__(self) -> None:
-        for name, value in (
-            ("min_primary_coverage", self.min_primary_coverage),
-            ("min_supporting_coverage", self.min_supporting_coverage),
-            ("max_primary_missing_fraction", self.max_primary_missing_fraction),
-            ("max_supporting_missing_fraction", self.max_supporting_missing_fraction),
-            ("min_primary_join_fraction", self.min_primary_join_fraction),
-            ("min_supporting_join_fraction", self.min_supporting_join_fraction),
-        ):
+        values = {
+            "min_primary_coverage": self.min_primary_coverage,
+            "min_supporting_coverage": self.min_supporting_coverage,
+            "max_primary_missing_fraction": self.max_primary_missing_fraction,
+            "max_supporting_missing_fraction": self.max_supporting_missing_fraction,
+            "min_primary_join_fraction": self.min_primary_join_fraction,
+            "min_supporting_join_fraction": self.min_supporting_join_fraction,
+        }
+        for name, value in values.items():
             if not 0.0 <= float(value) <= 1.0:
                 raise ValueError(f"{name} must be in [0, 1]")
         if self.min_primary_coverage < self.min_supporting_coverage:
@@ -87,8 +84,6 @@ class DataFitnessPolicy:
 
 @dataclass(frozen=True)
 class DataFitnessProfile:
-    """Pre-outcome facts for one dataset required by the selected route."""
-
     dataset_id: str
     domain: DataDomain
     use_role: DataUseRole
@@ -205,11 +200,12 @@ def _role_thresholds(profile: DataFitnessProfile, policy: DataFitnessPolicy) -> 
 
 
 def _applicability(profile: DataFitnessProfile) -> tuple[DimensionAssessment, DimensionAssessment]:
-    pop_reasons: list[str] = []
-    if not profile.population_fit:
-        pop_reasons.append("population/species context does not match the intended use")
-    if not profile.geography_fit:
-        pop_reasons.append("geographic/environmental context does not match the intended use")
+    pop_reasons = tuple(
+        reason for condition, reason in (
+            (profile.population_fit, "population/species context does not match the intended use"),
+            (profile.geography_fit, "geographic/environmental context does not match the intended use"),
+        ) if not condition
+    )
     time_reasons = () if profile.temporal_fit else (
         "time period or developmental/sampling window does not match the intended use",
     )
@@ -225,10 +221,8 @@ def _applicability(profile: DataFitnessProfile) -> tuple[DimensionAssessment, Di
         pop_repairs = ("calibrate:mechanistic_scope", "discover:closer_population_match") if pop_reasons else ()
         time_repairs = ("calibrate:temporal_scope", "discover:closer_time_match") if time_reasons else ()
     else:
-        pop_grade = DataFitnessGrade.PASS
-        time_grade = DataFitnessGrade.PASS
-        pop_repairs = ()
-        time_repairs = ()
+        pop_grade = time_grade = DataFitnessGrade.PASS
+        pop_repairs = time_repairs = ()
 
     return (
         _assessment(DataFitnessDimension.POPULATION_GEOGRAPHY, pop_grade, *pop_reasons, repairs=pop_repairs),
@@ -244,70 +238,76 @@ def evaluate_general_data_fitness(
     """Evaluate domain-agnostic G3 without substituting for G3-OMICS."""
 
     policy = policy or DataFitnessPolicy()
-    dimensions: list[DimensionAssessment] = []
+    d: list[DimensionAssessment] = []
 
-    if profile.legal_reuse_permitted:
-        dimensions.append(_assessment(DataFitnessDimension.LEGAL_REUSE, DataFitnessGrade.PASS))
-    else:
-        dimensions.append(_assessment(
+    d.append(
+        _assessment(DataFitnessDimension.LEGAL_REUSE, DataFitnessGrade.PASS)
+        if profile.legal_reuse_permitted
+        else _assessment(
             DataFitnessDimension.LEGAL_REUSE,
             DataFitnessGrade.FAIL,
             "dataset use/reuse is not legally or contractually permitted",
             repairs=("replace:dataset_with_permitted_source", "obtain:reuse_authorization"),
-        ))
+        )
+    )
 
-    provenance_reasons: list[str] = []
-    if not profile.provenance_traceable:
-        provenance_reasons.append("dataset provenance is not traceable")
-    if not profile.source_identity_known:
-        provenance_reasons.append("source/accession/origin identity is unknown")
-    if provenance_reasons:
-        dimensions.append(_assessment(
+    provenance_reasons = tuple(
+        reason for condition, reason in (
+            (profile.provenance_traceable, "dataset provenance is not traceable"),
+            (profile.source_identity_known, "source/accession/origin identity is unknown"),
+        ) if not condition
+    )
+    d.append(
+        _assessment(
             DataFitnessDimension.PROVENANCE,
             DataFitnessGrade.FAIL,
             *provenance_reasons,
             repairs=("repair:source_provenance", "replace:untraceable_dataset"),
-        ))
-    else:
-        dimensions.append(_assessment(DataFitnessDimension.PROVENANCE, DataFitnessGrade.PASS))
+        )
+        if provenance_reasons
+        else _assessment(DataFitnessDimension.PROVENANCE, DataFitnessGrade.PASS)
+    )
 
-    dimensions.extend(_applicability(profile))
+    d.extend(_applicability(profile))
 
-    construct_reasons: list[str] = []
-    if not profile.construct_valid:
-        construct_reasons.append("dataset variables do not validly represent the intended construct")
-    if not profile.measurement_valid:
-        construct_reasons.append("measurement method is invalid or unsuitable for the intended construct")
-    if construct_reasons:
-        dimensions.append(_assessment(
+    construct_reasons = tuple(
+        reason for condition, reason in (
+            (profile.construct_valid, "dataset variables do not validly represent the intended construct"),
+            (profile.measurement_valid, "measurement method is invalid or unsuitable for the intended construct"),
+        ) if not condition
+    )
+    d.append(
+        _assessment(
             DataFitnessDimension.CONSTRUCT_VALIDITY,
             DataFitnessGrade.FAIL,
             *construct_reasons,
             repairs=("evolve:construct_or_measurement", "discover:valid_measurement_dataset"),
-        ))
-    else:
-        dimensions.append(_assessment(DataFitnessDimension.CONSTRUCT_VALIDITY, DataFitnessGrade.PASS))
+        )
+        if construct_reasons
+        else _assessment(DataFitnessDimension.CONSTRUCT_VALIDITY, DataFitnessGrade.PASS)
+    )
 
     if not profile.critical_qc_pass:
-        dimensions.append(_assessment(
+        d.append(_assessment(
             DataFitnessDimension.QUALITY,
             DataFitnessGrade.FAIL,
             "critical data-quality checks failed",
             repairs=("repair:data_quality", "replace:failed_dataset"),
         ))
     elif not profile.quality_documented:
-        dimensions.append(_assessment(
+        d.append(_assessment(
             DataFitnessDimension.QUALITY,
             DataFitnessGrade.CONDITIONAL,
             "critical QC passed but quality methods/evidence are incompletely documented",
             repairs=("document:quality_evidence",),
         ))
     else:
-        dimensions.append(_assessment(DataFitnessDimension.QUALITY, DataFitnessGrade.PASS))
+        d.append(_assessment(DataFitnessDimension.QUALITY, DataFitnessGrade.PASS))
 
     min_coverage, max_missing, min_join = _role_thresholds(profile, policy)
+
     if not profile.required_fields_present:
-        dimensions.append(_assessment(
+        d.append(_assessment(
             DataFitnessDimension.COVERAGE,
             DataFitnessGrade.FAIL,
             "one or more variables required for the intended analysis are absent",
@@ -315,50 +315,52 @@ def evaluate_general_data_fitness(
         ))
     elif profile.coverage_fraction < min_coverage:
         grade = DataFitnessGrade.FAIL if profile.use_role is DataUseRole.PRIMARY_TEST else DataFitnessGrade.CONDITIONAL
-        dimensions.append(_assessment(
+        d.append(_assessment(
             DataFitnessDimension.COVERAGE,
             grade,
             f"usable coverage {profile.coverage_fraction:.3f} is below the predeclared {min_coverage:.3f} threshold",
             repairs=("repair:coverage", "discover:better_coverage_dataset", "calibrate:claim_scope"),
         ))
     else:
-        dimensions.append(_assessment(DataFitnessDimension.COVERAGE, DataFitnessGrade.PASS))
+        d.append(_assessment(DataFitnessDimension.COVERAGE, DataFitnessGrade.PASS))
 
     if profile.missing_fraction > max_missing:
-        if profile.use_role is DataUseRole.PRIMARY_TEST or not profile.missingness_strategy_available:
-            missing_grade = DataFitnessGrade.FAIL
-        else:
-            missing_grade = DataFitnessGrade.CONDITIONAL
-        dimensions.append(_assessment(
+        grade = (
+            DataFitnessGrade.FAIL
+            if profile.use_role is DataUseRole.PRIMARY_TEST or not profile.missingness_strategy_available
+            else DataFitnessGrade.CONDITIONAL
+        )
+        d.append(_assessment(
             DataFitnessDimension.MISSINGNESS,
-            missing_grade,
+            grade,
             f"missing fraction {profile.missing_fraction:.3f} exceeds the predeclared {max_missing:.3f} threshold",
             repairs=("repair:missingness_plan", "discover:lower_missingness_dataset", "calibrate:claim_scope"),
         ))
     elif profile.missing_fraction > 0 and not profile.missingness_characterized:
-        dimensions.append(_assessment(
+        d.append(_assessment(
             DataFitnessDimension.MISSINGNESS,
             DataFitnessGrade.CONDITIONAL,
             "missingness exists but its pattern/mechanism has not been characterized",
             repairs=("characterize:missingness",),
         ))
     else:
-        dimensions.append(_assessment(DataFitnessDimension.MISSINGNESS, DataFitnessGrade.PASS))
+        d.append(_assessment(DataFitnessDimension.MISSINGNESS, DataFitnessGrade.PASS))
 
-    if profile.outcome_or_key_variation_present:
-        dimensions.append(_assessment(DataFitnessDimension.VARIATION, DataFitnessGrade.PASS))
-    else:
-        dimensions.append(_assessment(
+    d.append(
+        _assessment(DataFitnessDimension.VARIATION, DataFitnessGrade.PASS)
+        if profile.outcome_or_key_variation_present
+        else _assessment(
             DataFitnessDimension.VARIATION,
             DataFitnessGrade.FAIL,
             "required outcome/exposure/key variable has insufficient variation for the intended analysis",
             repairs=("replace:noninformative_dataset", "evolve:estimand_or_sampling"),
-        ))
+        )
+    )
 
     if not profile.requires_join:
-        dimensions.append(_assessment(DataFitnessDimension.JOINABILITY, DataFitnessGrade.PASS))
+        d.append(_assessment(DataFitnessDimension.JOINABILITY, DataFitnessGrade.PASS))
     elif not profile.stable_join_keys:
-        dimensions.append(_assessment(
+        d.append(_assessment(
             DataFitnessDimension.JOINABILITY,
             DataFitnessGrade.FAIL,
             "required tables cannot be joined with stable unique keys",
@@ -366,39 +368,46 @@ def evaluate_general_data_fitness(
         ))
     elif profile.join_coverage_fraction < min_join:
         grade = DataFitnessGrade.FAIL if profile.use_role is DataUseRole.PRIMARY_TEST else DataFitnessGrade.CONDITIONAL
-        dimensions.append(_assessment(
+        d.append(_assessment(
             DataFitnessDimension.JOINABILITY,
             grade,
             f"join coverage {profile.join_coverage_fraction:.3f} is below the predeclared {min_join:.3f} threshold",
             repairs=("repair:join_coverage", "calibrate:claim_scope"),
         ))
     else:
-        dimensions.append(_assessment(DataFitnessDimension.JOINABILITY, DataFitnessGrade.PASS))
+        d.append(_assessment(DataFitnessDimension.JOINABILITY, DataFitnessGrade.PASS))
 
-    ident_reasons: list[str] = []
-    if not profile.target_estimand_identifiable:
-        ident_reasons.append("target estimand/question is not identifiable from these data")
-    if profile.use_role is DataUseRole.PRIMARY_TEST and not profile.required_confounders_available:
-        ident_reasons.append("required confounders/covariates for the primary estimand are unavailable")
+    ident_reasons = tuple(
+        reason for condition, reason in (
+            (profile.target_estimand_identifiable, "target estimand/question is not identifiable from these data"),
+            (
+                profile.required_confounders_available or profile.use_role is not DataUseRole.PRIMARY_TEST,
+                "required confounders/covariates for the primary estimand are unavailable",
+            ),
+        ) if not condition
+    )
     if ident_reasons:
         grade = DataFitnessGrade.FAIL if profile.use_role is DataUseRole.PRIMARY_TEST else DataFitnessGrade.CONDITIONAL
-        dimensions.append(_assessment(
+        d.append(_assessment(
             DataFitnessDimension.IDENTIFIABILITY,
             grade,
             *ident_reasons,
             repairs=("evolve:estimand", "discover:identifiable_dataset", "calibrate:noncausal_claim"),
         ))
     else:
-        dimensions.append(_assessment(DataFitnessDimension.IDENTIFIABILITY, DataFitnessGrade.PASS))
+        d.append(_assessment(DataFitnessDimension.IDENTIFIABILITY, DataFitnessGrade.PASS))
 
-    bias_reasons: list[str] = []
-    severe_unaddressable = profile.severe_selection_bias and not profile.selection_bias_addressable
-    survivorship_unaddressable = profile.survivorship_bias_present and not profile.survivorship_bias_addressable
+    bias_reasons = []
     if profile.severe_selection_bias:
         bias_reasons.append("material selection bias is present")
     if profile.survivorship_bias_present:
         bias_reasons.append("material survivorship bias is present")
-    if severe_unaddressable or survivorship_unaddressable:
+    unaddressable = (
+        profile.severe_selection_bias and not profile.selection_bias_addressable
+    ) or (
+        profile.survivorship_bias_present and not profile.survivorship_bias_addressable
+    )
+    if unaddressable:
         grade = DataFitnessGrade.FAIL if profile.use_role is DataUseRole.PRIMARY_TEST else DataFitnessGrade.CONDITIONAL
         repairs = ("replace:biased_dataset", "calibrate:claim_scope")
     elif bias_reasons:
@@ -407,10 +416,10 @@ def evaluate_general_data_fitness(
     else:
         grade = DataFitnessGrade.PASS
         repairs = ()
-    dimensions.append(_assessment(DataFitnessDimension.SELECTION_BIAS, grade, *bias_reasons, repairs=repairs))
+    d.append(_assessment(DataFitnessDimension.SELECTION_BIAS, grade, *bias_reasons, repairs=repairs))
 
     if not profile.units_known:
-        dimensions.append(_assessment(
+        d.append(_assessment(
             DataFitnessDimension.UNIT_CONSISTENCY,
             DataFitnessGrade.FAIL,
             "measurement units are unknown",
@@ -418,53 +427,51 @@ def evaluate_general_data_fitness(
         ))
     elif not profile.units_harmonized:
         grade = DataFitnessGrade.CONDITIONAL if profile.units_harmonizable else DataFitnessGrade.FAIL
-        dimensions.append(_assessment(
+        d.append(_assessment(
             DataFitnessDimension.UNIT_CONSISTENCY,
             grade,
             "measurement units are not harmonized across required records/sources",
             repairs=("harmonize:units",) if profile.units_harmonizable else ("replace:incompatible_units_data",),
         ))
     else:
-        dimensions.append(_assessment(DataFitnessDimension.UNIT_CONSISTENCY, DataFitnessGrade.PASS))
+        d.append(_assessment(DataFitnessDimension.UNIT_CONSISTENCY, DataFitnessGrade.PASS))
 
     if profile.sample_independence_known:
-        dimensions.append(_assessment(DataFitnessDimension.INDEPENDENCE, DataFitnessGrade.PASS))
+        d.append(_assessment(DataFitnessDimension.INDEPENDENCE, DataFitnessGrade.PASS))
     else:
         grade = DataFitnessGrade.FAIL if profile.use_role is DataUseRole.PRIMARY_TEST else DataFitnessGrade.CONDITIONAL
-        dimensions.append(_assessment(
+        d.append(_assessment(
             DataFitnessDimension.INDEPENDENCE,
             grade,
             "sample/experimental-unit independence cannot be established",
             repairs=("resolve:sample_independence", "calibrate:exploratory_or_contextual_use"),
         ))
 
-    repro_reasons: list[str] = []
-    if not profile.reproducible_acquisition:
-        repro_reasons.append("dataset cannot be reacquired reproducibly from its declared source")
-    if not profile.source_versioned_or_freezeable:
-        repro_reasons.append("source is neither versioned nor freezeable for hash-locked provenance")
-    if repro_reasons:
-        dimensions.append(_assessment(
+    repro_reasons = tuple(
+        reason for condition, reason in (
+            (profile.reproducible_acquisition, "dataset cannot be reacquired reproducibly from its declared source"),
+            (profile.source_versioned_or_freezeable, "source is neither versioned nor freezeable for hash-locked provenance"),
+        ) if not condition
+    )
+    d.append(
+        _assessment(
             DataFitnessDimension.REPRODUCIBILITY,
             DataFitnessGrade.FAIL,
             *repro_reasons,
             repairs=("repair:reproducible_acquisition", "replace:unversionable_source"),
-        ))
-    else:
-        dimensions.append(_assessment(DataFitnessDimension.REPRODUCIBILITY, DataFitnessGrade.PASS))
+        )
+        if repro_reasons
+        else _assessment(DataFitnessDimension.REPRODUCIBILITY, DataFitnessGrade.PASS)
+    )
 
-    grades = {d.grade for d in dimensions}
-    if DataFitnessGrade.FAIL in grades:
-        overall = DataFitnessGrade.FAIL
-    elif DataFitnessGrade.CONDITIONAL in grades:
-        overall = DataFitnessGrade.CONDITIONAL
-    else:
-        overall = DataFitnessGrade.PASS
-
-    repairs = tuple(dict.fromkeys(
-        action for dimension in dimensions for action in dimension.repair_actions
-    ))
-    return overall, tuple(dimensions), repairs
+    grades = {x.grade for x in d}
+    overall = (
+        DataFitnessGrade.FAIL if DataFitnessGrade.FAIL in grades
+        else DataFitnessGrade.CONDITIONAL if DataFitnessGrade.CONDITIONAL in grades
+        else DataFitnessGrade.PASS
+    )
+    repairs = tuple(dict.fromkeys(action for x in d for action in x.repair_actions))
+    return overall, tuple(d), repairs
 
 
 def _omics_layer_grade(
@@ -475,50 +482,38 @@ def _omics_layer_grade(
         return DataFitnessGrade.PASS, _assessment(DataFitnessDimension.DOMAIN_GATE, DataFitnessGrade.PASS)
 
     if omics_fitness is None:
-        return (
+        return DataFitnessGrade.CONDITIONAL, _assessment(
+            DataFitnessDimension.DOMAIN_GATE,
             DataFitnessGrade.CONDITIONAL,
-            _assessment(
-                DataFitnessDimension.DOMAIN_GATE,
-                DataFitnessGrade.CONDITIONAL,
-                "omics dataset passed General G3 but G3-OMICS has not been completed",
-                repairs=("run:g3_omics",),
-            ),
+            "omics dataset passed General G3 but G3-OMICS has not been completed",
+            repairs=("run:g3_omics",),
         )
     if omics_fitness is OmicsFitness.E:
-        return (
+        return DataFitnessGrade.FAIL, _assessment(
+            DataFitnessDimension.DOMAIN_GATE,
             DataFitnessGrade.FAIL,
-            _assessment(
-                DataFitnessDimension.DOMAIN_GATE,
-                DataFitnessGrade.FAIL,
-                "G3-OMICS classified the dataset as incompatible",
-                repairs=("discover:compatible_omics_dataset", "evolve:omics_claim_role"),
-            ),
+            "G3-OMICS classified the dataset as incompatible",
+            repairs=("discover:compatible_omics_dataset", "evolve:omics_claim_role"),
         )
 
     if profile.use_role is DataUseRole.PRIMARY_TEST:
         if omics_fitness is OmicsFitness.A:
             return DataFitnessGrade.PASS, _assessment(DataFitnessDimension.DOMAIN_GATE, DataFitnessGrade.PASS)
-        return (
+        return DataFitnessGrade.CONDITIONAL, _assessment(
+            DataFitnessDimension.DOMAIN_GATE,
             DataFitnessGrade.CONDITIONAL,
-            _assessment(
-                DataFitnessDimension.DOMAIN_GATE,
-                DataFitnessGrade.CONDITIONAL,
-                f"{omics_fitness.value} omics data cannot support an unqualified primary/direct test",
-                repairs=("calibrate:omics_claim_role", "discover:directly_comparable_omics_dataset"),
-            ),
+            f"{omics_fitness.value} omics data cannot support an unqualified primary/direct test",
+            repairs=("calibrate:omics_claim_role", "discover:directly_comparable_omics_dataset"),
         )
 
     if profile.use_role is DataUseRole.MECHANISTIC_SUPPORT:
         if omics_fitness in {OmicsFitness.A, OmicsFitness.B, OmicsFitness.C}:
             return DataFitnessGrade.PASS, _assessment(DataFitnessDimension.DOMAIN_GATE, DataFitnessGrade.PASS)
-        return (
+        return DataFitnessGrade.CONDITIONAL, _assessment(
+            DataFitnessDimension.DOMAIN_GATE,
             DataFitnessGrade.CONDITIONAL,
-            _assessment(
-                DataFitnessDimension.DOMAIN_GATE,
-                DataFitnessGrade.CONDITIONAL,
-                "contextual-only omics data cannot be treated as mechanistic support",
-                repairs=("calibrate:omics_claim_role", "discover:mechanistically_compatible_omics_dataset"),
-            ),
+            "contextual-only omics data cannot be treated as mechanistic support",
+            repairs=("calibrate:omics_claim_role", "discover:mechanistically_compatible_omics_dataset"),
         )
 
     return DataFitnessGrade.PASS, _assessment(DataFitnessDimension.DOMAIN_GATE, DataFitnessGrade.PASS)
@@ -540,22 +535,20 @@ def evaluate_layered_data_fitness(
 
     general_grade, general_dimensions, repairs = evaluate_general_data_fitness(profile, policy=policy)
     domain_grade, domain_assessment = _omics_layer_grade(profile, omics_fitness)
-    dimensions = general_dimensions + (domain_assessment,)
     all_repairs = tuple(dict.fromkeys(repairs + domain_assessment.repair_actions))
-
-    if general_grade is DataFitnessGrade.FAIL or domain_grade is DataFitnessGrade.FAIL:
-        layered = DataFitnessGrade.FAIL
-    elif general_grade is DataFitnessGrade.CONDITIONAL or domain_grade is DataFitnessGrade.CONDITIONAL:
-        layered = DataFitnessGrade.CONDITIONAL
-    else:
-        layered = DataFitnessGrade.PASS
-
+    layered = (
+        DataFitnessGrade.FAIL
+        if DataFitnessGrade.FAIL in {general_grade, domain_grade}
+        else DataFitnessGrade.CONDITIONAL
+        if DataFitnessGrade.CONDITIONAL in {general_grade, domain_grade}
+        else DataFitnessGrade.PASS
+    )
     return DatasetFitnessReport(
         dataset_id=profile.dataset_id,
         domain=profile.domain,
         use_role=profile.use_role,
         general_grade=general_grade,
-        dimensions=dimensions,
+        dimensions=general_dimensions + (domain_assessment,),
         repair_actions=all_repairs,
         omics_fitness=omics_fitness,
         layered_grade=layered,
@@ -574,26 +567,20 @@ def data_fitness_court(
 ) -> DataFitnessCourtResult:
     """Require every route-required dataset to pass General G3 and domain gates."""
 
+    if blocker_gate is not None:
+        blocker_gate.assert_can_advance(from_phase="feasibility", to_phase="data_fitness")
+
     profiles = list(profiles)
     if not profiles:
-        if route_requires_existing_data:
-            return DataFitnessCourtResult(
-                status=DataFitnessStatus.BLOCKED,
-                reports=(),
-                passed_dataset_ids=(),
-                conditional_dataset_ids=(),
-                failed_dataset_ids=(),
-                required_actions=("discover:required_data",),
-                advancement_allowed=False,
-            )
+        status = DataFitnessStatus.BLOCKED if route_requires_existing_data else DataFitnessStatus.ADVANCE
         return DataFitnessCourtResult(
-            status=DataFitnessStatus.ADVANCE,
+            status=status,
             reports=(),
             passed_dataset_ids=(),
             conditional_dataset_ids=(),
             failed_dataset_ids=(),
-            required_actions=(),
-            advancement_allowed=True,
+            required_actions=("discover:required_data",) if route_requires_existing_data else (),
+            advancement_allowed=status is DataFitnessStatus.ADVANCE,
         )
 
     ids = [p.dataset_id for p in profiles]
@@ -602,45 +589,37 @@ def data_fitness_court(
     if omics_metadata_by_dataset is not None and omics_fitness_by_dataset is not None:
         raise ValueError("provide omics metadata map or omics fitness map, not both")
 
-    if blocker_gate is not None:
-        blocker_gate.assert_can_advance(from_phase="feasibility", to_phase="data_fitness")
-
     omics_metadata_by_dataset = omics_metadata_by_dataset or {}
     omics_fitness_by_dataset = omics_fitness_by_dataset or {}
     unknown = (set(omics_metadata_by_dataset) | set(omics_fitness_by_dataset)) - set(ids)
     if unknown:
         raise ValueError(f"omics evidence supplied for unknown dataset(s): {sorted(unknown)}")
 
-    reports = [
+    reports = tuple(
         evaluate_layered_data_fitness(
-            profile,
-            omics_metadata=omics_metadata_by_dataset.get(profile.dataset_id),
-            omics_fitness=omics_fitness_by_dataset.get(profile.dataset_id),
+            p,
+            omics_metadata=omics_metadata_by_dataset.get(p.dataset_id),
+            omics_fitness=omics_fitness_by_dataset.get(p.dataset_id),
             policy=policy,
         )
-        for profile in profiles
-    ]
+        for p in profiles
+    )
+    passed = tuple(r.dataset_id for r in reports if r.layered_grade is DataFitnessGrade.PASS)
+    conditional = tuple(r.dataset_id for r in reports if r.layered_grade is DataFitnessGrade.CONDITIONAL)
+    failed = tuple(r.dataset_id for r in reports if r.layered_grade is DataFitnessGrade.FAIL)
 
-    passed = [r for r in reports if r.layered_grade is DataFitnessGrade.PASS]
-    conditional = [r for r in reports if r.layered_grade is DataFitnessGrade.CONDITIONAL]
-    failed = [r for r in reports if r.layered_grade is DataFitnessGrade.FAIL]
-
-    if failed:
-        status = DataFitnessStatus.BLOCKED
-    elif conditional:
-        status = DataFitnessStatus.REVISE
-    else:
-        status = DataFitnessStatus.ADVANCE
-
-    actions = tuple(dict.fromkeys(
-        action for report in reports for action in report.repair_actions
-    ))
+    status = (
+        DataFitnessStatus.BLOCKED if failed
+        else DataFitnessStatus.REVISE if conditional
+        else DataFitnessStatus.ADVANCE
+    )
+    actions = tuple(dict.fromkeys(action for r in reports for action in r.repair_actions))
     return DataFitnessCourtResult(
         status=status,
-        reports=tuple(reports),
-        passed_dataset_ids=tuple(r.dataset_id for r in passed),
-        conditional_dataset_ids=tuple(r.dataset_id for r in conditional),
-        failed_dataset_ids=tuple(r.dataset_id for r in failed),
+        reports=reports,
+        passed_dataset_ids=passed,
+        conditional_dataset_ids=conditional,
+        failed_dataset_ids=failed,
         required_actions=actions,
         advancement_allowed=status is DataFitnessStatus.ADVANCE,
     )
