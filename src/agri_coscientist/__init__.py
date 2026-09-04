@@ -57,6 +57,24 @@ from .dataset_freeze import (
     dataset_freeze_court,
     freeze_project_dataset,
 )
+from .analysis_specification import (
+    AnalysisLock,
+    AnalysisSpecificationPlan,
+    AnalysisSpecCourtResult,
+    AnalysisSpecGrade,
+    AnalysisSpecIssue,
+    AnalysisSpecStatus,
+    AnalysisTask,
+    FrozenAnalysisSpecification,
+    MultiplicityMethod,
+    PackagePin,
+    RuntimeSpec,
+    analysis_specification_court,
+    build_analysis_lock,
+    build_analysis_specification,
+    enter_project_analysis_specification,
+    lock_project_analysis,
+)
 
 __all__ = [
     "ProjectState", "Stage", "StudyMode", "OmicsMetadata", "OmicsFitness",
@@ -74,5 +92,10 @@ __all__ = [
     "AssetRole", "DataOrigin", "DatasetFreeze", "DatasetFreezeCourtResult",
     "DatasetFreezeGrade", "DatasetFreezeIssue", "DatasetFreezePlan",
     "DatasetFreezeStatus", "ExclusionRecord", "FrozenDataAsset",
-    "build_dataset_freeze", "dataset_freeze_court", "freeze_project_dataset"
+    "build_dataset_freeze", "dataset_freeze_court", "freeze_project_dataset",
+    "AnalysisLock", "AnalysisSpecificationPlan", "AnalysisSpecCourtResult",
+    "AnalysisSpecGrade", "AnalysisSpecIssue", "AnalysisSpecStatus", "AnalysisTask",
+    "FrozenAnalysisSpecification", "MultiplicityMethod", "PackagePin", "RuntimeSpec",
+    "analysis_specification_court", "build_analysis_lock", "build_analysis_specification",
+    "enter_project_analysis_specification", "lock_project_analysis"
 ]
