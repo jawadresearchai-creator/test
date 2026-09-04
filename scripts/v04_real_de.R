@@ -38,9 +38,12 @@ asset_for <- function(asset_id) {
 read_featurecounts <- function(asset_id, group_name, expected_reps) {
   path <- asset_for(asset_id)
   tab <- read.delim(gzfile(path), check.names = FALSE, stringsAsFactors = FALSE)
-  if (!all(c("Geneid", "Length") %in% names(tab))) stop(paste(asset_id, "is not the expected featureCounts table"))
-  count_cols <- setdiff(names(tab), c("Geneid", "Length"))
-  if (length(count_cols) != expected_reps) stop(paste(asset_id, "replicate-column count changed"))
+  if (!("Geneid" %in% names(tab))) stop(paste(asset_id, "has no Geneid column"))
+  annotation_cols <- intersect(c("Geneid", "Chr", "Start", "End", "Strand", "Length"), names(tab))
+  count_cols <- setdiff(names(tab), annotation_cols)
+  if (length(count_cols) != expected_reps) {
+    stop(paste(asset_id, "expected", expected_reps, "sample-count columns but found", length(count_cols), paste(count_cols, collapse = ",")))
+  }
   if (anyDuplicated(tab$Geneid)) stop(paste(asset_id, "contains duplicate Geneid values"))
   counts <- as.matrix(tab[, count_cols, drop = FALSE])
   storage.mode(counts) <- "numeric"
