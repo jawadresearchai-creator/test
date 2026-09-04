@@ -12,11 +12,29 @@ from .feasibility import (
     evaluate_route,
     feasibility_court,
 )
+from .data_fitness import (
+    DataDomain,
+    DataFitnessCourtResult,
+    DataFitnessDimension,
+    DataFitnessGrade,
+    DataFitnessPolicy,
+    DataFitnessProfile,
+    DataFitnessStatus,
+    DataUseRole,
+    DatasetFitnessReport,
+    data_fitness_court,
+    evaluate_general_data_fitness,
+    evaluate_layered_data_fitness,
+)
 
 __all__ = [
     "ProjectState", "Stage", "StudyMode", "OmicsMetadata", "OmicsFitness",
     "grade_omics_fitness", "freeze_manifest", "verify_manifest", "analysis_lock",
     "EvidenceStrength", "claim_verb", "CourtStatus", "FeasibilityDimension",
     "FeasibilityGrade", "PublicDataRole", "RouteProposal", "evaluate_route",
-    "feasibility_court"
+    "feasibility_court", "DataDomain", "DataFitnessCourtResult",
+    "DataFitnessDimension", "DataFitnessGrade", "DataFitnessPolicy",
+    "DataFitnessProfile", "DataFitnessStatus", "DataUseRole",
+    "DatasetFitnessReport", "data_fitness_court", "evaluate_general_data_fitness",
+    "evaluate_layered_data_fitness"
 ]
