@@ -159,7 +159,7 @@ jobs:
           cache: pip
       - name: Install discovery/novelty kernel
         run: python -m pip install -e .
-      - name: Exercise Europe PMC + Crossref and scoped novelty court
+      - name: Exercise Europe PMC + OpenAlex + Crossref scoped novelty court
         run: python scripts/live_literature_novelty.py
       - uses: actions/upload-artifact@v4
         if: always()
