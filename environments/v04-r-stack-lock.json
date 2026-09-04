@@ -1,0 +1,8 @@
+{
+  "r": "4.6.1",
+  "packages": {
+    "DESeq2": "1.52.0",
+    "jsonlite": "2.0.0"
+  },
+  "purpose": "v0.4 real public RNA-seq differential-expression capability scenario"
+}

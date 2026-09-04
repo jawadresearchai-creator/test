@@ -42,6 +42,16 @@ class GeneAnnotation:
     raw: dict
 
 
+WHEAT_IWGSC_V1 = GenomeBuild(
+    species="Triticum aestivum",
+    assembly="IWGSC",
+    provider="Ensembl Plants",
+    provider_release="63",
+    provider_species="Triticum_aestivum",
+    gprofiler_organism="taestivum",
+    accession="GCA_900519105.1",
+)
+
 WHEAT_REFSEQ_V2 = GenomeBuild(
     species="Triticum aestivum",
     assembly="IWGSC_RefSeq_v2.1",
@@ -52,7 +62,10 @@ WHEAT_REFSEQ_V2 = GenomeBuild(
     accession="GCA_018294505.1",
 )
 
-BUILD_REGISTRY = {WHEAT_REFSEQ_V2.assembly: WHEAT_REFSEQ_V2}
+BUILD_REGISTRY = {
+    WHEAT_IWGSC_V1.assembly: WHEAT_IWGSC_V1,
+    WHEAT_REFSEQ_V2.assembly: WHEAT_REFSEQ_V2,
+}
 
 
 class GeneAnnotationAdapter(Protocol):
@@ -108,7 +121,7 @@ def _annotation_from_raw(gene_id: str, build: GenomeBuild, raw: dict, provider: 
 
 class _JsonLookupAdapter:
     def __init__(self, *, opener: Callable = urlopen, timeout: int = 30,
-                 user_agent: str = "Agriculture-CoScientist-test/0.3"):
+                 user_agent: str = "Agriculture-CoScientist-test/0.4"):
         self.opener = opener
         self.timeout = timeout
         self.user_agent = user_agent
@@ -148,11 +161,7 @@ class EnsemblRestAdapter(_JsonLookupAdapter):
 
 
 class GrameneEnsemblAdapter(_JsonLookupAdapter):
-    """Optional Gramene Ensembl-compatible lookup.
-
-    Gramene is useful as a secondary plant annotation provider, but current
-    build support is verified independently. Build mismatch is never tolerated.
-    """
+    """Optional Gramene Ensembl-compatible lookup; exact-build matching is mandatory."""
 
     def __init__(self, *, base_url: str = "https://data.gramene.org/ensembl", **kwargs):
         super().__init__(**kwargs)

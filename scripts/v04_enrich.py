@@ -1,0 +1,280 @@
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import json
+import math
+from pathlib import Path
+
+from agri_coscientist.annotation import BUILD_REGISTRY, EnsemblRestAdapter
+from agri_coscientist.enrichment import GProfilerAdapter, GProfilerConversionCoverage
+from agri_coscientist.scenario import ScenarioError
+
+
+def read_rows(path: Path) -> list[dict[str, str]]:
+    with path.open(newline="", encoding="utf-8") as fh:
+        return list(csv.DictReader(fh))
+
+
+def finite_float(value: str | None) -> float | None:
+    if value in (None, "", "NA", "NaN"):
+        return None
+    x = float(value)
+    return x if math.isfinite(x) else None
+
+
+def write_results(path: Path, rows) -> None:
+    payload = [
+        {
+            "term_id": r.term_id,
+            "name": r.name,
+            "source": r.source,
+            "q_value": r.q_value,
+            "query_size": r.query_size,
+            "statistical_domain_size": r.background_size,
+            "term_size": r.term_size,
+            "intersection_size": r.intersection_size,
+            "intersection": list(r.intersection),
+            "provider": r.provider,
+        }
+        for r in rows
+    ]
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def resolve_build_sentinel(background: list[str], build):
+    adapter = EnsemblRestAdapter(user_agent="Agriculture-CoScientist-test/0.4")
+    failures: list[str] = []
+    for gene_id in background[:50]:
+        try:
+            annotation = adapter.lookup(gene_id, build)
+        except Exception as exc:
+            failures.append(f"{gene_id}: {type(exc).__name__}")
+            continue
+        if annotation.assembly != build.assembly:
+            raise ScenarioError(
+                f"tested-gene sentinel {gene_id} resolved to {annotation.assembly}, expected {build.assembly}"
+            )
+        return annotation, failures
+    raise ScenarioError(
+        "none of the first 50 tested genes resolved against the locked Ensembl assembly; "
+        f"first failures: {failures[:5]}"
+    )
+
+
+def _id_list_hash(values: tuple[str, ...]) -> str:
+    payload = "\n".join(values).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def coverage_summary(
+    coverage: GProfilerConversionCoverage,
+    *,
+    minimum_fraction: float,
+    label: str,
+) -> dict:
+    if coverage.mapping_fraction < minimum_fraction:
+        raise ScenarioError(
+            f"g:Convert {label} unambiguous mapping coverage {coverage.mapping_fraction:.3f} "
+            f"is below locked minimum {minimum_fraction:.3f}"
+        )
+    return {
+        "method": "g:Convert->ENSG",
+        "input_genes": coverage.input_size,
+        "unambiguously_mapped_genes": coverage.mapped_size,
+        "mapping_fraction": coverage.mapping_fraction,
+        "minimum_mapping_fraction": minimum_fraction,
+        "unmapped_count": len(coverage.unmapped_ids),
+        "ambiguous_count": len(coverage.ambiguous_ids),
+        "unmapped_ids_sha256": _id_list_hash(coverage.unmapped_ids),
+        "ambiguous_ids_sha256": _id_list_hash(coverage.ambiguous_ids),
+        "unmapped_examples": list(coverage.unmapped_ids[:25]),
+        "ambiguous_examples": list(coverage.ambiguous_ids[:25]),
+        "target_namespace": coverage.target_namespace,
+        "chunks": coverage.chunks,
+        "provider_result_rows": coverage.provider_result_rows,
+        "status": "PASS",
+    }
+
+
+def validate_provider_build(versions: dict, build) -> None:
+    observed_organism = versions.get("organism")
+    observed_build = versions.get("genebuild")
+    if observed_organism != build.gprofiler_organism:
+        raise ScenarioError(
+            f"g:Profiler data-version organism {observed_organism!r} does not match locked {build.gprofiler_organism!r}"
+        )
+    if observed_build != build.assembly:
+        raise ScenarioError(
+            f"g:Profiler data-version genebuild {observed_build!r} does not match locked {build.assembly!r}"
+        )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("run_dir", type=Path)
+    args = parser.parse_args()
+    run_dir = args.run_dir.resolve()
+
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    lock = json.loads((run_dir / "analysis_lock.json").read_text())
+    marker = json.loads((run_dir / "PRE_OUTCOME_LOCK_COMPLETE.json").read_text())
+    if marker.get("pre_outcome_boundary") != "COMPLETE":
+        raise ScenarioError("pre-outcome lock is not complete")
+    if marker.get("analysis_lock_sha256") != lock.get("analysis_lock_sha256"):
+        raise ScenarioError("analysis lock marker mismatch")
+
+    build_name = manifest["genome_build"]["assembly"]
+    build = BUILD_REGISTRY.get(build_name)
+    if build is None:
+        raise ScenarioError(f"unregistered genome build: {build_name}")
+    if build.accession != manifest["genome_build"]["accession"]:
+        raise ScenarioError("manifest genome accession does not match build registry")
+    if build.gprofiler_organism != manifest["genome_build"]["gprofiler_organism"]:
+        raise ScenarioError("manifest g:Profiler organism does not match build registry")
+
+    de_path = run_dir / "results" / "deseq2_all_genes.csv"
+    if not de_path.exists():
+        raise ScenarioError("DESeq2 results are missing")
+    rows = read_rows(de_path)
+    if not rows:
+        raise ScenarioError("DESeq2 results are empty")
+
+    background = [r["Geneid"] for r in rows if r.get("Geneid")]
+    if len(background) != len(set(background)):
+        raise ScenarioError("DESeq2 tested-gene universe contains duplicate IDs")
+    if not background:
+        raise ScenarioError("enrichment background is empty")
+
+    annotation, sentinel_failures = resolve_build_sentinel(background, build)
+
+    analysis = manifest["analysis"]
+    fdr = float(analysis["fdr_threshold"])
+    effect = float(analysis["effect_threshold_for_enrichment"])
+    min_query_mapping = float(analysis["min_query_mapping_fraction"])
+    min_background_mapping = float(analysis["min_background_mapping_fraction"])
+    if analysis.get("enrichment_all_results_for_mapping_qc") is not True:
+        raise ScenarioError("mapping-QC all-results policy is not enabled")
+
+    up: list[str] = []
+    down: list[str] = []
+    for row in rows:
+        padj = finite_float(row.get("padj"))
+        lfc = finite_float(row.get("log2FoldChange"))
+        if padj is None or lfc is None or padj > fdr or abs(lfc) < effect:
+            continue
+        if lfc > 0:
+            up.append(row["Geneid"])
+        elif lfc < 0:
+            down.append(row["Geneid"])
+
+    out_dir = run_dir / "results" / "enrichment"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    gp = GProfilerAdapter(user_agent="Agriculture-CoScientist-test/0.4")
+    versions = gp.data_versions(build)
+    validate_provider_build(versions, build)
+
+    background_coverage = gp.convert_coverage(background, build)
+    background_qc = coverage_summary(
+        background_coverage,
+        minimum_fraction=min_background_mapping,
+        label="tested-background",
+    )
+    (out_dir / "gprofiler_background_mapping_qc.json").write_text(
+        json.dumps(background_qc, indent=2, sort_keys=True) + "\n"
+    )
+
+    directional = {}
+    for direction, query in (("up", up), ("down", down)):
+        if query:
+            query_coverage = gp.convert_coverage(query, build)
+            query_qc = coverage_summary(
+                query_coverage,
+                minimum_fraction=min_query_mapping,
+                label=f"{direction}-candidate-query",
+            )
+            response = gp.profile_response(
+                query,
+                background,
+                build,
+                sources=("GO:BP", "GO:MF", "GO:CC"),
+                user_threshold=fdr,
+                all_results=True,
+            )
+            significant = [
+                r for r in response.results
+                if r.q_value <= fdr and (r.raw or {}).get("significant", True) is not False
+            ]
+            statistical_domains = sorted({r.background_size for r in response.results})
+            metadata_payload = {
+                "query_mapping_qc": query_qc,
+                "background_mapping_qc": background_qc,
+                "provider_meta": response.meta,
+                "all_result_rows": len(response.results),
+                "significant_result_rows": len(significant),
+                "statistical_domain_sizes": statistical_domains,
+                "note": "statistical_domain_sizes are hypergeometric domain sizes, not identifier-mapping counts",
+            }
+        else:
+            significant = []
+            query_qc = {
+                "method": "g:Convert->ENSG",
+                "input_genes": 0,
+                "minimum_mapping_fraction": min_query_mapping,
+                "status": "NOT_APPLICABLE_NO_CANDIDATES",
+            }
+            metadata_payload = {
+                "query_mapping_qc": query_qc,
+                "background_mapping_qc": background_qc,
+                "provider_meta": None,
+                "all_result_rows": 0,
+                "significant_result_rows": 0,
+                "statistical_domain_sizes": [],
+            }
+        (out_dir / f"gprofiler_{direction}_metadata.json").write_text(
+            json.dumps(metadata_payload, indent=2, sort_keys=True) + "\n"
+        )
+        write_results(out_dir / f"gprofiler_{direction}.json", significant)
+        directional[direction] = {
+            "query_genes": len(query),
+            "query_mapping_qc": query_qc,
+            "significant_terms": len(significant),
+            "top_terms": [
+                {"term_id": r.term_id, "name": r.name, "source": r.source, "q_value": r.q_value}
+                for r in significant[:10]
+            ],
+        }
+
+    report = {
+        "scenario_id": manifest["scenario_id"],
+        "capability_only": True,
+        "assembly": build.assembly,
+        "assembly_accession": build.accession,
+        "gprofiler_organism": build.gprofiler_organism,
+        "tested_gene_sentinel": {
+            "gene_id": annotation.gene_id,
+            "observed_assembly": annotation.assembly,
+            "seq_region": annotation.seq_region,
+            "failed_candidates_before_success": sentinel_failures,
+        },
+        "background_genes": len(background),
+        "background_definition": "all genes passing locked total-count prefilter",
+        "background_mapping_qc": background_qc,
+        "thresholds": {
+            "padj": fdr,
+            "abs_log2FoldChange": effect,
+            "min_query_mapping_fraction": min_query_mapping,
+            "min_background_mapping_fraction": min_background_mapping,
+        },
+        "gprofiler_data_versions": versions,
+        "directions": directional,
+        "analysis_lock_sha256": lock["analysis_lock_sha256"],
+        "status": "PASS",
+    }
+    (out_dir / "enrichment_summary.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    print(json.dumps(report, indent=2, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,72 @@
+{
+  "scenario_id": "GSE235844_Rawal87_vs_Sonalika_roots_v1",
+  "capability_only": true,
+  "scientific_purpose": "Exercise the public-omics pipeline on a genuine three-replicate wheat root genotype contrast; do not represent this capability scenario as a novel study.",
+  "dataset": {
+    "repository": "NCBI GEO",
+    "accession": "GSE235844",
+    "bioproject": "PRJNA863398",
+    "species": "Triticum aestivum",
+    "tissue": "root",
+    "treatment": "control/optimum growth conditions",
+    "representation": "featurecounts_integer_counts",
+    "assets": [
+      {
+        "asset_id": "Rawal-87_roots",
+        "sample_accession": "GSM7510657",
+        "url": "https://ftp.ncbi.nlm.nih.gov/geo/samples/GSM7510nnn/GSM7510657/suppl/GSM7510657_counts-Rawal-87-roots.txt.gz"
+      },
+      {
+        "asset_id": "Sonalika_roots",
+        "sample_accession": "GSM7510660",
+        "url": "https://ftp.ncbi.nlm.nih.gov/geo/samples/GSM7510nnn/GSM7510660/suppl/GSM7510660_counts-Sonalika-roots.txt.gz"
+      }
+    ]
+  },
+  "genome_build": {
+    "assembly": "IWGSC",
+    "accession": "GCA_900519105.1",
+    "gene_id_family": "TraesCS*02G*",
+    "gprofiler_organism": "taestivum"
+  },
+  "contrast": {
+    "factor": "genotype",
+    "reference": "Rawal-87",
+    "numerator": "Sonalika",
+    "groups": [
+      {"name": "Rawal-87", "asset_id": "Rawal-87_roots", "expected_replicates": 3},
+      {"name": "Sonalika", "asset_id": "Sonalika_roots", "expected_replicates": 3}
+    ]
+  },
+  "analysis": {
+    "de_method": "DESeq2",
+    "design": "~ genotype",
+    "prefilter_total_count": 10,
+    "independent_filtering": false,
+    "cooks_cutoff": false,
+    "replace_outlier_counts": false,
+    "outlier_policy": "report_not_exclude",
+    "fdr_method": "BH",
+    "fdr_threshold": 0.05,
+    "effect_threshold_for_enrichment": 1.0,
+    "enrichment_direction": "separate_up_down",
+    "enrichment_background": "all_genes_passing_locked_prefilter",
+    "enrichment_provider": "g:Profiler",
+    "enrichment_domain_scope": "custom",
+    "enrichment_correction": "fdr",
+    "enrichment_all_results_for_mapping_qc": true,
+    "min_query_mapping_fraction": 0.90,
+    "min_background_mapping_fraction": 0.90
+  },
+  "hard_rejections": [
+    "normalized TPM/FPKM passed to DESeq2",
+    "fewer than three replicate count columns in either group",
+    "non-integer or negative counts",
+    "mixed or unknown wheat assembly",
+    "query genes outside enrichment background",
+    "outcome-dependent threshold changes after analysis lock",
+    "silent outcome-dependent gene exclusion or count replacement",
+    "g:Profiler candidate-query mapping below 90 percent",
+    "g:Profiler tested-gene background mapping below 90 percent"
+  ]
+}
