@@ -178,7 +178,7 @@ class GProfilerAdapter:
         if not gene_list:
             raise ValueError("gene list is required for mapping coverage")
 
-        mapped: dict[str, set[str]] = {}
+        conversions: dict[str, set[str]] = {}
         result_rows = 0
         chunks = 0
         input_by_key = {gene.lower(): gene for gene in gene_list}
@@ -204,20 +204,20 @@ class GProfilerAdapter:
                 key = incoming.lower()
                 if key not in input_by_key:
                     continue
-                mapped.setdefault(key, set()).add(converted)
+                conversions.setdefault(key, set()).add(converted)
 
-        mapped_keys = set(mapped)
-        unmapped = tuple(gene for gene in gene_list if gene.lower() not in mapped_keys)
-        ambiguous = tuple(
-            input_by_key[key] for key, conversions in mapped.items() if len(conversions) > 1
-        )
-        mapped_size = len(mapped_keys)
+        unambiguous_keys = {key for key, values in conversions.items() if len(values) == 1}
+        ambiguous_keys = {key for key, values in conversions.items() if len(values) > 1}
+        absent_keys = set(input_by_key) - set(conversions)
+        unmapped = tuple(sorted(input_by_key[key] for key in absent_keys))
+        ambiguous = tuple(sorted(input_by_key[key] for key in ambiguous_keys))
+        mapped_size = len(unambiguous_keys)
         return GProfilerConversionCoverage(
             input_size=len(gene_list),
             mapped_size=mapped_size,
             mapping_fraction=mapped_size / len(gene_list),
             unmapped_ids=unmapped,
-            ambiguous_ids=tuple(sorted(ambiguous)),
+            ambiguous_ids=ambiguous,
             target_namespace=target_namespace,
             chunks=chunks,
             provider_result_rows=result_rows,
