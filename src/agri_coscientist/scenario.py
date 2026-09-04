@@ -112,6 +112,12 @@ def validate_scenario_manifest(manifest: Mapping) -> None:
         raise ScenarioError("v0.4 enrichment provider is locked to g:Profiler")
     if analysis.get("enrichment_domain_scope") != "custom" or analysis.get("enrichment_correction") != "fdr":
         raise ScenarioError("v0.4 enrichment requires custom background with FDR correction")
+    if analysis.get("enrichment_all_results_for_mapping_qc") is not True:
+        raise ScenarioError("v0.4 requires all-result g:Profiler retrieval for mapping QC")
+    if float(analysis.get("min_query_mapping_fraction", -1)) != 0.90:
+        raise ScenarioError("v0.4 candidate-query mapping threshold is locked at 0.90")
+    if float(analysis.get("min_background_mapping_fraction", -1)) != 0.90:
+        raise ScenarioError("v0.4 background mapping threshold is locked at 0.90")
 
 
 def build_dataset_freeze(manifest: Mapping, assets: Iterable[FrozenAsset]) -> dict:
