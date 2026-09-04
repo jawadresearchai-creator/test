@@ -98,6 +98,19 @@ def coverage_summary(
     }
 
 
+def validate_provider_build(versions: dict, build) -> None:
+    observed_organism = versions.get("organism")
+    observed_build = versions.get("genebuild")
+    if observed_organism != build.gprofiler_organism:
+        raise ScenarioError(
+            f"g:Profiler data-version organism {observed_organism!r} does not match locked {build.gprofiler_organism!r}"
+        )
+    if observed_build != build.assembly:
+        raise ScenarioError(
+            f"g:Profiler data-version genebuild {observed_build!r} does not match locked {build.assembly!r}"
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("run_dir", type=Path)
@@ -160,6 +173,7 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     gp = GProfilerAdapter(user_agent="Agriculture-CoScientist-test/0.4")
     versions = gp.data_versions(build)
+    validate_provider_build(versions, build)
 
     background_coverage = gp.convert_coverage(background, build)
     background_qc = coverage_summary(
