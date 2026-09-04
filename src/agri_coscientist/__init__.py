@@ -42,6 +42,21 @@ from .design import (
     design_court,
     freeze_project_design,
 )
+from .dataset_freeze import (
+    AssetRole,
+    DataOrigin,
+    DatasetFreeze,
+    DatasetFreezeCourtResult,
+    DatasetFreezeGrade,
+    DatasetFreezeIssue,
+    DatasetFreezePlan,
+    DatasetFreezeStatus,
+    ExclusionRecord,
+    FrozenDataAsset,
+    build_dataset_freeze,
+    dataset_freeze_court,
+    freeze_project_dataset,
+)
 
 __all__ = [
     "ProjectState", "Stage", "StudyMode", "OmicsMetadata", "OmicsFitness",
@@ -55,5 +70,9 @@ __all__ = [
     "evaluate_layered_data_fitness", "AllocationMethod", "DesignCourtResult",
     "DesignFreeze", "DesignGrade", "DesignStatus", "InferenceIntent",
     "OutcomeSpec", "OutcomeTier", "PhysicalDesign", "PublicDatasetDesign",
-    "StudyDesign", "build_design_freeze", "design_court", "freeze_project_design"
+    "StudyDesign", "build_design_freeze", "design_court", "freeze_project_design",
+    "AssetRole", "DataOrigin", "DatasetFreeze", "DatasetFreezeCourtResult",
+    "DatasetFreezeGrade", "DatasetFreezeIssue", "DatasetFreezePlan",
+    "DatasetFreezeStatus", "ExclusionRecord", "FrozenDataAsset",
+    "build_dataset_freeze", "dataset_freeze_court", "freeze_project_dataset"
 ]
