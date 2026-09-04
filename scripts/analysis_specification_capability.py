@@ -16,15 +16,19 @@ from agri_coscientist.analysis_specification import (
     lock_project_analysis,
 )
 from agri_coscientist.data_fitness import DataUseRole
-from agri_coscientist.dataset_freeze import DatasetFreezePlan, build_dataset_freeze, dataset_freeze_court
+from agri_coscientist.dataset_freeze import (
+    DatasetFreezePlan,
+    build_dataset_freeze as build_dataset_freeze_object,
+    dataset_freeze_court,
+)
 from agri_coscientist.state import ProjectState, Stage, StudyMode
 from dataset_freeze_capability import build_design, physical_asset, public_asset
 
 
-def build_dataset_freeze():
+def build_freezes():
     _, design_freeze = build_design()
     retained = tuple(f"pot-{i:02d}" for i in range(1, 13))
-    plan = DatasetFreezePlan(
+    dataset_plan = DatasetFreezePlan(
         freeze_id="wheat-hybrid-dataset-freeze-v1",
         design_freeze_sha256=design_freeze.design_freeze_sha256,
         mode=StudyMode.HYBRID,
@@ -32,12 +36,8 @@ def build_dataset_freeze():
         retained_independent_unit_ids=retained,
         outcome_values_inspected_before_freeze=False,
     )
-    result = dataset_freeze_court(plan, design_freeze)
-    return design_freeze, build_dataset_freeze_object(plan, design_freeze, result)
-
-
-def build_dataset_freeze_object(plan, design_freeze, result):
-    return build_dataset_freeze(plan, design_freeze, result)
+    result = dataset_freeze_court(dataset_plan, design_freeze)
+    return design_freeze, build_dataset_freeze_object(dataset_plan, design_freeze, result)
 
 
 def runtimes():
@@ -91,7 +91,6 @@ def physical_primary(**overrides):
 
 
 def public_mechanistic(**overrides):
-    planned = "prespecified root mechanical-stress contrast for mechanistic context only"
     values = dict(
         task_id="public-omics-mechanistic",
         component="public_wheat_root_mechanical_context",
@@ -120,16 +119,15 @@ def public_mechanistic(**overrides):
         implementation_entrypoint="scripts/analysis/public_mechanistic.R",
         execution_order=2,
         public_data_role=DataUseRole.MECHANISTIC_SUPPORT,
-        planned_use_binding=planned,
+        planned_use_binding="prespecified root mechanical-stress contrast for mechanistic context only",
         direct_validation_claim=False,
     )
     values.update(overrides)
     return AnalysisTask(**values)
 
 
-def main():
-    design_freeze, dataset_freeze = build_dataset_freeze()
-    plan = AnalysisSpecificationPlan(
+def base_plan(design_freeze, dataset_freeze):
+    return AnalysisSpecificationPlan(
         specification_id="wheat-hybrid-analysis-specification-v1",
         design_freeze_sha256=design_freeze.design_freeze_sha256,
         dataset_freeze_sha256=dataset_freeze.dataset_freeze_sha256,
@@ -140,49 +138,31 @@ def main():
         outcome_values_inspected_before_specification=False,
         notes=("public omics remains independent mechanistic support only",),
     )
+
+
+def main():
+    design_freeze, dataset_freeze = build_freezes()
+    plan = base_plan(design_freeze, dataset_freeze)
     court = analysis_specification_court(plan, design_freeze, dataset_freeze)
     frozen_spec = build_analysis_specification(plan, design_freeze, dataset_freeze, court)
     lock = build_analysis_lock(frozen_spec)
 
-    attacks = {}
-    attacks["outcome_peeking"] = analysis_specification_court(
-        replace(plan, outcome_values_inspected_before_specification=True), design_freeze, dataset_freeze
-    ).status.value
-    attacks["wrong_dataset_binding"] = analysis_specification_court(
-        replace(plan, dataset_freeze_sha256="9" * 64), design_freeze, dataset_freeze
-    ).status.value
-    attacks["technical_unit_pseudoreplication"] = analysis_specification_court(
-        replace(plan, tasks=(physical_primary(unit_of_analysis="technical assay well"), public_mechanistic())),
-        design_freeze, dataset_freeze,
-    ).status.value
-    attacks["lost_blocking"] = analysis_specification_court(
-        replace(plan, tasks=(physical_primary(adjustment_terms=()), public_mechanistic())),
-        design_freeze, dataset_freeze,
-    ).status.value
-    attacks["postfreeze_exclusion_change"] = analysis_specification_court(
-        replace(plan, tasks=(physical_primary(exclusion_policy="drop model outliers"), public_mechanistic())),
-        design_freeze, dataset_freeze,
-    ).status.value
-    attacks["data_dependent_method_selection"] = analysis_specification_court(
-        replace(plan, tasks=(physical_primary(data_dependent_method_selection=True), public_mechanistic())),
-        design_freeze, dataset_freeze,
-    ).status.value
-    attacks["public_role_promotion"] = analysis_specification_court(
-        replace(plan, tasks=(physical_primary(), public_mechanistic(public_data_role=DataUseRole.PRIMARY_TEST))),
-        design_freeze, dataset_freeze,
-    ).status.value
-    attacks["public_direct_validation_overreach"] = analysis_specification_court(
-        replace(plan, tasks=(physical_primary(), public_mechanistic(direct_validation_claim=True))),
-        design_freeze, dataset_freeze,
-    ).status.value
-    attacks["unpinned_analysis_engine"] = analysis_specification_court(
-        replace(plan, tasks=(physical_primary(engine_package="unversioned-engine"), public_mechanistic())),
-        design_freeze, dataset_freeze,
-    ).status.value
-    attacks["missing_primary_analysis"] = analysis_specification_court(
-        replace(plan, tasks=(replace(physical_primary(), confirmatory=False), public_mechanistic())),
-        design_freeze, dataset_freeze,
-    ).status.value
+    attack_plans = {
+        "outcome_peeking": replace(plan, outcome_values_inspected_before_specification=True),
+        "wrong_dataset_binding": replace(plan, dataset_freeze_sha256="9" * 64),
+        "technical_unit_pseudoreplication": replace(plan, tasks=(physical_primary(unit_of_analysis="technical assay well"), public_mechanistic())),
+        "lost_blocking": replace(plan, tasks=(physical_primary(adjustment_terms=()), public_mechanistic())),
+        "postfreeze_exclusion_change": replace(plan, tasks=(physical_primary(exclusion_policy="drop model outliers"), public_mechanistic())),
+        "data_dependent_method_selection": replace(plan, tasks=(physical_primary(data_dependent_method_selection=True), public_mechanistic())),
+        "public_role_promotion": replace(plan, tasks=(physical_primary(), public_mechanistic(public_data_role=DataUseRole.PRIMARY_TEST))),
+        "public_direct_validation_overreach": replace(plan, tasks=(physical_primary(), public_mechanistic(direct_validation_claim=True))),
+        "unpinned_analysis_engine": replace(plan, tasks=(physical_primary(engine_package="unversioned-engine"), public_mechanistic())),
+        "missing_primary_analysis": replace(plan, tasks=(replace(physical_primary(), confirmatory=False), public_mechanistic())),
+    }
+    attacks = {
+        name: analysis_specification_court(attack_plan, design_freeze, dataset_freeze).status.value
+        for name, attack_plan in attack_plans.items()
+    }
 
     state = ProjectState("analysis-specification-capability")
     state.stage = Stage.DATASET_FROZEN
