@@ -98,6 +98,8 @@ def validate_scenario_manifest(manifest: Mapping) -> None:
         raise ScenarioError("v0.4 requires DESeq2 independent filtering disabled")
     if analysis.get("cooks_cutoff") is not False:
         raise ScenarioError("v0.4 requires Cook's-distance result exclusion disabled")
+    if analysis.get("replace_outlier_counts") is not False:
+        raise ScenarioError("v0.4 requires automatic DESeq2 outlier-count replacement disabled")
     if analysis.get("outlier_policy") != "report_not_exclude":
         raise ScenarioError("v0.4 outlier policy is report_not_exclude")
     if analysis.get("fdr_method") != "BH" or float(analysis.get("fdr_threshold", 2)) != 0.05:
