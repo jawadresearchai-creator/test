@@ -31,6 +31,12 @@ class EnrichmentResult:
     raw: dict | None = None
 
 
+@dataclass(frozen=True)
+class GProfilerProfileResponse:
+    results: tuple[EnrichmentResult, ...]
+    meta: dict
+
+
 def benjamini_hochberg(p_values: Iterable[float]) -> list[float]:
     values = [float(p) for p in p_values]
     if any((not math.isfinite(p) or p < 0 or p > 1) for p in values):
@@ -114,7 +120,7 @@ class GProfilerAdapter:
     VERSION_URL = "https://biit.cs.ut.ee/gprofiler/api/util/data_versions/"
 
     def __init__(self, *, opener: Callable = urlopen, timeout: int = 60,
-                 user_agent: str = "Agriculture-CoScientist-test/0.3"):
+                 user_agent: str = "Agriculture-CoScientist-test/0.4"):
         self.opener = opener
         self.timeout = timeout
         self.user_agent = user_agent
@@ -135,7 +141,7 @@ class GProfilerAdapter:
             "Accept": "application/json", "User-Agent": self.user_agent,
         }))
 
-    def profile(
+    def profile_response(
         self,
         query: Iterable[str],
         background: Iterable[str],
@@ -144,7 +150,8 @@ class GProfilerAdapter:
         sources: tuple[str, ...] = ("GO:BP", "GO:MF", "GO:CC"),
         no_iea: bool = False,
         user_threshold: float = 0.05,
-    ) -> list[EnrichmentResult]:
+        all_results: bool = False,
+    ) -> GProfilerProfileResponse:
         if not build.gprofiler_organism:
             raise EnrichmentError(f"no g:Profiler organism mapping for {build.assembly}")
         if not (0.0 < float(user_threshold) <= 1.0):
@@ -167,6 +174,8 @@ class GProfilerAdapter:
             "no_evidences": True,
             "no_iea": bool(no_iea),
         }
+        if all_results:
+            body["all_results"] = True
         request = Request(
             self.PROFILE_URL,
             data=json.dumps(body).encode("utf-8"),
@@ -186,7 +195,7 @@ class GProfilerAdapter:
                 name=raw.get("name"),
                 source=raw.get("source"),
                 p_value=float(raw.get("p_value", 1.0)),
-                q_value=float(raw.get("p_value", 1.0)),  # corrected by selected FDR method
+                q_value=float(raw.get("p_value", 1.0)),  # adjusted by selected FDR method
                 query_size=int(raw.get("query_size") or len(query_list)),
                 background_size=int(raw.get("effective_domain_size") or len(background_list)),
                 term_size=int(raw.get("term_size") or 0),
@@ -195,4 +204,26 @@ class GProfilerAdapter:
                 provider="g:Profiler",
                 raw=raw,
             ))
-        return sorted(results, key=lambda r: (r.q_value, r.term_id))
+        ordered = tuple(sorted(results, key=lambda r: (r.q_value, r.term_id)))
+        return GProfilerProfileResponse(results=ordered, meta=payload.get("meta") or {})
+
+    def profile(
+        self,
+        query: Iterable[str],
+        background: Iterable[str],
+        build: GenomeBuild,
+        *,
+        sources: tuple[str, ...] = ("GO:BP", "GO:MF", "GO:CC"),
+        no_iea: bool = False,
+        user_threshold: float = 0.05,
+    ) -> list[EnrichmentResult]:
+        response = self.profile_response(
+            query,
+            background,
+            build,
+            sources=sources,
+            no_iea=no_iea,
+            user_threshold=user_threshold,
+            all_results=False,
+        )
+        return list(response.results)
