@@ -37,6 +37,18 @@ class GProfilerProfileResponse:
     meta: dict
 
 
+@dataclass(frozen=True)
+class GProfilerConversionCoverage:
+    input_size: int
+    mapped_size: int
+    mapping_fraction: float
+    unmapped_ids: tuple[str, ...]
+    ambiguous_ids: tuple[str, ...]
+    target_namespace: str
+    chunks: int
+    provider_result_rows: int
+
+
 def benjamini_hochberg(p_values: Iterable[float]) -> list[float]:
     values = [float(p) for p in p_values]
     if any((not math.isfinite(p) or p < 0 or p > 1) for p in values):
@@ -63,11 +75,6 @@ def overrepresentation(
     *,
     term_names: Mapping[str, str] | None = None,
 ) -> list[EnrichmentResult]:
-    """One-sided hypergeometric ORA with explicit universe and BH-FDR.
-
-    `associations` maps term IDs to genes annotated to each term. Query genes
-    MUST be drawn from the supplied background; otherwise analysis aborts.
-    """
     query_set = {str(g) for g in query}
     background_set = {str(g) for g in background}
     if not background_set:
@@ -114,10 +121,9 @@ def overrepresentation(
 
 
 class GProfilerAdapter:
-    """g:Profiler g:GOSt adapter with mandatory custom background + FDR."""
-
     PROFILE_URL = "https://biit.cs.ut.ee/gprofiler/api/gost/profile/"
     VERSION_URL = "https://biit.cs.ut.ee/gprofiler/api/util/data_versions/"
+    CONVERT_URL = "https://biit.cs.ut.ee/gprofiler/api/convert/convert/"
 
     def __init__(self, *, opener: Callable = urlopen, timeout: int = 60,
                  user_agent: str = "Agriculture-CoScientist-test/0.4"):
@@ -129,9 +135,24 @@ class GProfilerAdapter:
         with self.opener(request, timeout=self.timeout) as response:
             payload = response.read()
         try:
-            return json.loads(payload.decode("utf-8"))
+            decoded = json.loads(payload.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise EnrichmentError("g:Profiler returned invalid JSON") from exc
+        if not isinstance(decoded, dict):
+            raise EnrichmentError("g:Profiler returned an unexpected JSON shape")
+        return decoded
+
+    def _post_json(self, url: str, body: dict) -> dict:
+        return self._request_json(Request(
+            url,
+            data=json.dumps(body).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": self.user_agent,
+            },
+            method="POST",
+        ))
 
     def data_versions(self, build: GenomeBuild) -> dict:
         if not build.gprofiler_organism:
@@ -140,6 +161,67 @@ class GProfilerAdapter:
         return self._request_json(Request(url, headers={
             "Accept": "application/json", "User-Agent": self.user_agent,
         }))
+
+    def convert_coverage(
+        self,
+        genes: Iterable[str],
+        build: GenomeBuild,
+        *,
+        target_namespace: str = "ENSG",
+        chunk_size: int = 5000,
+    ) -> GProfilerConversionCoverage:
+        if not build.gprofiler_organism:
+            raise EnrichmentError(f"no g:Profiler organism mapping for {build.assembly}")
+        if chunk_size < 1:
+            raise ValueError("chunk_size must be positive")
+        gene_list = list(dict.fromkeys(map(str, genes)))
+        if not gene_list:
+            raise ValueError("gene list is required for mapping coverage")
+
+        mapped: dict[str, set[str]] = {}
+        result_rows = 0
+        chunks = 0
+        input_by_key = {gene.lower(): gene for gene in gene_list}
+        for offset in range(0, len(gene_list), chunk_size):
+            chunks += 1
+            chunk = gene_list[offset: offset + chunk_size]
+            payload = self._post_json(self.CONVERT_URL, {
+                "organism": build.gprofiler_organism,
+                "query": chunk,
+                "target": target_namespace,
+            })
+            rows = payload.get("result") or []
+            if not isinstance(rows, list):
+                raise EnrichmentError("g:Convert result is not a list")
+            result_rows += len(rows)
+            for raw in rows:
+                if not isinstance(raw, dict):
+                    continue
+                incoming = str(raw.get("incoming") or "").strip()
+                converted = str(raw.get("converted") or "").strip()
+                if not incoming or not converted or converted.upper() in {"N/A", "NA", "?", "NONE"}:
+                    continue
+                key = incoming.lower()
+                if key not in input_by_key:
+                    continue
+                mapped.setdefault(key, set()).add(converted)
+
+        mapped_keys = set(mapped)
+        unmapped = tuple(gene for gene in gene_list if gene.lower() not in mapped_keys)
+        ambiguous = tuple(
+            input_by_key[key] for key, conversions in mapped.items() if len(conversions) > 1
+        )
+        mapped_size = len(mapped_keys)
+        return GProfilerConversionCoverage(
+            input_size=len(gene_list),
+            mapped_size=mapped_size,
+            mapping_fraction=mapped_size / len(gene_list),
+            unmapped_ids=unmapped,
+            ambiguous_ids=tuple(sorted(ambiguous)),
+            target_namespace=target_namespace,
+            chunks=chunks,
+            provider_result_rows=result_rows,
+        )
 
     def profile_response(
         self,
@@ -176,17 +258,7 @@ class GProfilerAdapter:
         }
         if all_results:
             body["all_results"] = True
-        request = Request(
-            self.PROFILE_URL,
-            data=json.dumps(body).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "User-Agent": self.user_agent,
-            },
-            method="POST",
-        )
-        payload = self._request_json(request)
+        payload = self._post_json(self.PROFILE_URL, body)
         results = []
         for raw in payload.get("result", []):
             intersection = tuple(raw.get("intersections") or ())
@@ -195,7 +267,7 @@ class GProfilerAdapter:
                 name=raw.get("name"),
                 source=raw.get("source"),
                 p_value=float(raw.get("p_value", 1.0)),
-                q_value=float(raw.get("p_value", 1.0)),  # adjusted by selected FDR method
+                q_value=float(raw.get("p_value", 1.0)),
                 query_size=int(raw.get("query_size") or len(query_list)),
                 background_size=int(raw.get("effective_domain_size") or len(background_list)),
                 term_size=int(raw.get("term_size") or 0),
@@ -217,7 +289,7 @@ class GProfilerAdapter:
         no_iea: bool = False,
         user_threshold: float = 0.05,
     ) -> list[EnrichmentResult]:
-        response = self.profile_response(
+        return list(self.profile_response(
             query,
             background,
             build,
@@ -225,5 +297,4 @@ class GProfilerAdapter:
             no_iea=no_iea,
             user_threshold=user_threshold,
             all_results=False,
-        )
-        return list(response.results)
+        ).results)
