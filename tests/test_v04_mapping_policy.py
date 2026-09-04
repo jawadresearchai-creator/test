@@ -41,7 +41,7 @@ class _Response:
         return json.dumps(self.payload).encode("utf-8")
 
 
-def test_gprofiler_profile_response_preserves_mapping_metadata_and_all_results_flag():
+def test_gprofiler_profile_response_preserves_provider_metadata_and_all_results_flag():
     captured = {}
 
     def opener(request, timeout=60):
@@ -85,3 +85,40 @@ def test_gprofiler_profile_response_preserves_mapping_metadata_and_all_results_f
     assert response.meta["genes_metadata"]["failed"] == ["TraesCS_missing"]
     assert response.results[0].query_size == 9
     assert response.results[0].background_size == 95
+
+
+def test_gconvert_coverage_counts_only_unambiguous_mappings():
+    captured = []
+
+    def opener(request, timeout=60):
+        body = json.loads(request.data.decode("utf-8"))
+        captured.append(body)
+        assert body["target"] == "ENSG"
+        rows = []
+        for gene in body["query"]:
+            if gene == "G_unmapped":
+                continue
+            if gene == "G_ambiguous":
+                rows.extend([
+                    {"incoming": gene, "converted": "ENSG_A"},
+                    {"incoming": gene, "converted": "ENSG_B"},
+                ])
+            else:
+                rows.append({"incoming": gene, "converted": f"ENSG_{gene}"})
+        return _Response({"result": rows})
+
+    adapter = GProfilerAdapter(opener=opener)
+    coverage = adapter.convert_coverage(
+        ["G1", "G2", "G_unmapped", "G_ambiguous"],
+        WHEAT_IWGSC_V1,
+        chunk_size=2,
+    )
+
+    assert len(captured) == 2
+    assert coverage.input_size == 4
+    assert coverage.mapped_size == 2
+    assert coverage.mapping_fraction == 0.5
+    assert coverage.unmapped_ids == ("G_unmapped",)
+    assert coverage.ambiguous_ids == ("G_ambiguous",)
+    assert coverage.chunks == 2
+    assert coverage.provider_result_rows == 4
