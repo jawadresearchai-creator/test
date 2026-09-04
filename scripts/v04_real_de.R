@@ -25,6 +25,7 @@ if (!identical(marker$dataset_freeze_sha256, freeze$freeze_sha256)) stop("datase
 if (!identical(manifest$analysis$de_method, "DESeq2")) stop("manifest does not lock DESeq2")
 if (!identical(manifest$analysis$independent_filtering, FALSE)) stop("v0.4 requires DESeq2 independent filtering disabled")
 if (!identical(manifest$analysis$cooks_cutoff, FALSE)) stop("v0.4 requires Cook's-distance result exclusion disabled")
+if (!identical(manifest$analysis$replace_outlier_counts, FALSE)) stop("v0.4 requires automatic outlier-count replacement disabled")
 if (!identical(manifest$analysis$outlier_policy, "report_not_exclude")) stop("v0.4 outlier policy mismatch")
 
 asset_for <- function(asset_id) {
@@ -84,7 +85,7 @@ if (anyNA(genotype)) stop("contrast group names do not match locked reference/nu
 col_data <- data.frame(genotype = genotype, row.names = colnames(count_matrix), check.names = FALSE)
 
 dds <- DESeqDataSetFromMatrix(countData = count_matrix, colData = col_data, design = ~ genotype)
-dds <- DESeq(dds, quiet = TRUE)
+dds <- DESeq(dds, quiet = TRUE, minReplicatesForReplace = Inf)
 res <- results(
   dds,
   contrast = c("genotype", numerator, reference),
@@ -121,7 +122,7 @@ cooks_diag <- list(
   finite_values = length(finite_cooks),
   maximum = if (length(finite_cooks)) max(finite_cooks) else NULL,
   median = if (length(finite_cooks)) median(finite_cooks) else NULL,
-  action = "reported_not_excluded"
+  action = "reported_not_excluded_or_replaced"
 )
 
 summary <- list(
@@ -132,6 +133,8 @@ summary <- list(
   contrast = paste0(numerator, " vs ", reference),
   independent_filtering = FALSE,
   cooks_cutoff = FALSE,
+  replace_outlier_counts = FALSE,
+  min_replicates_for_replace = "Inf",
   outlier_policy = "report_not_exclude",
   p_adjust_method = "BH",
   fdr_threshold = fdr,
