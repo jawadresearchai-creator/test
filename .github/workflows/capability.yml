@@ -208,6 +208,26 @@ jobs:
           path: data_fitness_capability.json
           if-no-files-found: error
 
+  study-design-freeze-court:
+    if: ${{ github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/feature/v0.4-real-public-omics' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.14'
+          cache: pip
+      - name: Install Study Design kernel
+        run: python -m pip install -e .
+      - name: Exercise route-aware Study Design Court and Design Freeze
+        run: python scripts/study_design_capability.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: study-design-freeze-capability-evidence
+          path: study_design_capability.json
+          if-no-files-found: error
+
   v04-real-public-omics:
     if: ${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/feature/v0.4-real-public-omics') || (github.event_name == 'pull_request' && github.head_ref == 'feature/v0.4-real-public-omics') }}
     uses: ./.github/workflows/v04-real-public-omics.yml
