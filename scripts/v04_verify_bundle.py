@@ -13,7 +13,7 @@ from agri_coscientist.scenario import ScenarioError, canonical_hash, file_sha256
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def load_json(path: Path) -> dict:
+def load_json(path: Path):
     if not path.exists():
         raise ScenarioError(f"missing required artifact: {path}")
     return json.loads(path.read_text())
@@ -140,6 +140,8 @@ def main() -> None:
         raise ScenarioError("outlier handling policy drifted")
     if de_summary.get("p_adjust_method") != "BH" or analysis.get("fdr_method") != "BH":
         raise ScenarioError("multiple-testing policy drifted")
+    if analysis.get("enrichment_all_results_for_mapping_qc") is not True:
+        raise ScenarioError("mapping-QC all-results policy drifted")
     if not (run_dir / "r_session_info.txt").is_file():
         raise ScenarioError("human-readable R session evidence is missing from final bundle")
 
@@ -178,12 +180,19 @@ def main() -> None:
 
     fdr = float(analysis["fdr_threshold"])
     effect = float(analysis["effect_threshold_for_enrichment"])
+    min_query_mapping = float(analysis["min_query_mapping_fraction"])
+    min_background_mapping = float(analysis["min_background_mapping_fraction"])
+    thresholds = enrichment.get("thresholds") or {}
     if float(de_summary["fdr_threshold"]) != fdr:
         raise ScenarioError("DE FDR threshold differs from lock")
     if float(de_summary["enrichment_effect_threshold_abs_log2fc"]) != effect:
         raise ScenarioError("DE effect threshold differs from lock")
-    if float(enrichment["thresholds"]["padj"]) != fdr or float(enrichment["thresholds"]["abs_log2FoldChange"]) != effect:
+    if float(thresholds.get("padj", -1)) != fdr or float(thresholds.get("abs_log2FoldChange", -1)) != effect:
         raise ScenarioError("enrichment thresholds differ from lock")
+    if float(thresholds.get("min_query_mapping_fraction", -1)) != min_query_mapping:
+        raise ScenarioError("query mapping threshold differs from lock")
+    if float(thresholds.get("min_background_mapping_fraction", -1)) != min_background_mapping:
+        raise ScenarioError("background mapping threshold differs from lock")
 
     expected_up: set[str] = set()
     expected_down: set[str] = set()
@@ -202,10 +211,43 @@ def main() -> None:
         raise ScenarioError("DE summary up-candidate count is inconsistent")
     if int(de_summary["down_for_enrichment"]) != len(expected_down):
         raise ScenarioError("DE summary down-candidate count is inconsistent")
-    if int(enrichment["directions"]["up"]["query_genes"]) != len(expected_up):
-        raise ScenarioError("up-enrichment query was altered after DE")
-    if int(enrichment["directions"]["down"]["query_genes"]) != len(expected_down):
-        raise ScenarioError("down-enrichment query was altered after DE")
+
+    expected_by_direction = {"up": expected_up, "down": expected_down}
+    for direction, expected_genes in expected_by_direction.items():
+        direction_summary = enrichment["directions"][direction]
+        if int(direction_summary["query_genes"]) != len(expected_genes):
+            raise ScenarioError(f"{direction}-enrichment query was altered after DE")
+        qc = direction_summary.get("mapping_qc") or {}
+        metadata = load_json(run_dir / "results" / "enrichment" / f"gprofiler_{direction}_metadata.json")
+        if metadata.get("mapping_qc") != qc:
+            raise ScenarioError(f"{direction} mapping-QC metadata differs from enrichment summary")
+        term_rows = load_json(run_dir / "results" / "enrichment" / f"gprofiler_{direction}.json")
+        if len(term_rows) != int(direction_summary["significant_terms"]):
+            raise ScenarioError(f"{direction} significant-term count differs from result file")
+        for term in term_rows:
+            q = float(term["q_value"])
+            if not 0 <= q <= fdr:
+                raise ScenarioError(f"{direction} enrichment contains a term outside locked FDR threshold")
+        if expected_genes:
+            if qc.get("status") != "PASS":
+                raise ScenarioError(f"{direction} mapping QC did not pass")
+            if int(qc.get("input_query_genes", -1)) != len(expected_genes):
+                raise ScenarioError(f"{direction} mapping QC query size differs from DE candidates")
+            if int(qc.get("input_background_genes", -1)) != len(rows):
+                raise ScenarioError(f"{direction} mapping QC background differs from tested universe")
+            qfrac = float(qc.get("query_mapping_fraction", -1))
+            bfrac = float(qc.get("background_mapping_fraction", -1))
+            if not min_query_mapping <= qfrac <= 1.0:
+                raise ScenarioError(f"{direction} query mapping coverage is below locked minimum")
+            if not min_background_mapping <= bfrac <= 1.0:
+                raise ScenarioError(f"{direction} background mapping coverage is below locked minimum")
+            if not isinstance(metadata.get("provider_meta"), dict):
+                raise ScenarioError(f"{direction} raw g:Profiler metadata is missing")
+        else:
+            if qc.get("status") != "NOT_APPLICABLE_NO_CANDIDATES":
+                raise ScenarioError(f"{direction} zero-candidate mapping status is invalid")
+            if term_rows:
+                raise ScenarioError(f"{direction} has enrichment terms despite zero candidate genes")
 
     candidate_rows = read_csv(run_dir / "results" / "deseq2_enrichment_candidates.csv")
     candidate_genes = {r["Geneid"] for r in candidate_rows}
@@ -232,6 +274,9 @@ def main() -> None:
             "fixed_prefilter_BH_and_outlier_policy": "PASS",
             "candidate_reconstruction": "PASS",
             "custom_background_identity": "PASS",
+            "gprofiler_mapping_coverage": "PASS",
+            "gprofiler_provider_metadata": "PASS",
+            "directional_enrichment_integrity": "PASS",
             "genome_build_binding": "PASS",
         },
         "claim_boundary": {
