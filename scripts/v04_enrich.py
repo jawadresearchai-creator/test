@@ -6,8 +6,8 @@ import json
 import math
 from pathlib import Path
 
-from agri_coscientist.annotation import AnnotationError, BUILD_REGISTRY, EnsemblRestAdapter
-from agri_coscientist.enrichment import GProfilerAdapter
+from agri_coscientist.annotation import BUILD_REGISTRY, EnsemblRestAdapter
+from agri_coscientist.enrichment import GProfilerAdapter, GProfilerProfileResponse
 from agri_coscientist.scenario import ScenarioError
 
 
@@ -45,9 +45,6 @@ def write_results(path: Path, rows) -> None:
 def resolve_build_sentinel(background: list[str], build):
     adapter = EnsemblRestAdapter(user_agent="Agriculture-CoScientist-test/0.4")
     failures: list[str] = []
-    # Some historical stable IDs can be retired in current Ensembl releases.
-    # Require at least one gene from the actual tested universe to resolve to the
-    # exact declared assembly, while recording failed candidates as provenance.
     for gene_id in background[:50]:
         try:
             annotation = adapter.lookup(gene_id, build)
@@ -63,6 +60,45 @@ def resolve_build_sentinel(background: list[str], build):
         "none of the first 50 tested genes resolved against the locked Ensembl assembly; "
         f"first failures: {failures[:5]}"
     )
+
+
+def mapping_qc(
+    response: GProfilerProfileResponse,
+    query: list[str],
+    background: list[str],
+    *,
+    min_query_fraction: float,
+    min_background_fraction: float,
+) -> dict:
+    if not response.results:
+        raise ScenarioError(
+            "g:Profiler returned no GO result rows with all_results enabled; mapping coverage cannot be established"
+        )
+    mapped_query = max(r.query_size for r in response.results)
+    mapped_background = max(r.background_size for r in response.results)
+    query_fraction = min(1.0, mapped_query / len(query))
+    background_fraction = min(1.0, mapped_background / len(background))
+    if query_fraction < min_query_fraction:
+        raise ScenarioError(
+            f"g:Profiler candidate-query mapping coverage {query_fraction:.3f} is below locked minimum {min_query_fraction:.3f}"
+        )
+    if background_fraction < min_background_fraction:
+        raise ScenarioError(
+            f"g:Profiler background mapping coverage {background_fraction:.3f} is below locked minimum {min_background_fraction:.3f}"
+        )
+    genes_metadata = response.meta.get("genes_metadata") if isinstance(response.meta, dict) else None
+    return {
+        "input_query_genes": len(query),
+        "mapped_query_genes_effective": mapped_query,
+        "query_mapping_fraction": query_fraction,
+        "input_background_genes": len(background),
+        "mapped_background_genes_effective": mapped_background,
+        "background_mapping_fraction": background_fraction,
+        "min_query_mapping_fraction": min_query_fraction,
+        "min_background_mapping_fraction": min_background_fraction,
+        "provider_genes_metadata": genes_metadata,
+        "status": "PASS",
+    }
 
 
 def main() -> None:
@@ -103,8 +139,14 @@ def main() -> None:
 
     annotation, sentinel_failures = resolve_build_sentinel(background, build)
 
-    fdr = float(manifest["analysis"]["fdr_threshold"])
-    effect = float(manifest["analysis"]["effect_threshold_for_enrichment"])
+    analysis = manifest["analysis"]
+    fdr = float(analysis["fdr_threshold"])
+    effect = float(analysis["effect_threshold_for_enrichment"])
+    min_query_mapping = float(analysis["min_query_mapping_fraction"])
+    min_background_mapping = float(analysis["min_background_mapping_fraction"])
+    if analysis.get("enrichment_all_results_for_mapping_qc") is not True:
+        raise ScenarioError("mapping-QC all-results policy is not enabled")
+
     up: list[str] = []
     down: list[str] = []
     for row in rows:
@@ -125,22 +167,53 @@ def main() -> None:
     directional = {}
     for direction, query in (("up", up), ("down", down)):
         if query:
-            results = gp.profile(
+            response = gp.profile_response(
                 query,
                 background,
                 build,
                 sources=("GO:BP", "GO:MF", "GO:CC"),
                 user_threshold=fdr,
+                all_results=True,
+            )
+            qc = mapping_qc(
+                response,
+                query,
+                background,
+                min_query_fraction=min_query_mapping,
+                min_background_fraction=min_background_mapping,
+            )
+            significant = [
+                r for r in response.results
+                if r.q_value <= fdr and (r.raw or {}).get("significant", True) is not False
+            ]
+            meta_payload = {
+                "mapping_qc": qc,
+                "provider_meta": response.meta,
+                "all_result_rows": len(response.results),
+                "significant_result_rows": len(significant),
+            }
+            (out_dir / f"gprofiler_{direction}_metadata.json").write_text(
+                json.dumps(meta_payload, indent=2, sort_keys=True) + "\n"
             )
         else:
-            results = []
-        write_results(out_dir / f"gprofiler_{direction}.json", results)
+            significant = []
+            qc = {
+                "input_query_genes": 0,
+                "status": "NOT_APPLICABLE_NO_CANDIDATES",
+                "min_query_mapping_fraction": min_query_mapping,
+                "min_background_mapping_fraction": min_background_mapping,
+            }
+            (out_dir / f"gprofiler_{direction}_metadata.json").write_text(
+                json.dumps({"mapping_qc": qc, "provider_meta": None}, indent=2, sort_keys=True) + "\n"
+            )
+        write_results(out_dir / f"gprofiler_{direction}.json", significant)
         directional[direction] = {
             "query_genes": len(query),
-            "significant_terms": len(results),
+            "mapping_qc": qc,
+            "significant_terms": len(significant),
             "top_terms": [
                 {"term_id": r.term_id, "name": r.name, "source": r.source, "q_value": r.q_value}
-                for r in results[:10]
+                for r in significant[:10]
             ],
         }
 
@@ -158,7 +231,12 @@ def main() -> None:
         },
         "background_genes": len(background),
         "background_definition": "all genes passing locked total-count prefilter",
-        "thresholds": {"padj": fdr, "abs_log2FoldChange": effect},
+        "thresholds": {
+            "padj": fdr,
+            "abs_log2FoldChange": effect,
+            "min_query_mapping_fraction": min_query_mapping,
+            "min_background_mapping_fraction": min_background_mapping,
+        },
         "gprofiler_data_versions": versions,
         "directions": directional,
         "analysis_lock_sha256": lock["analysis_lock_sha256"],
