@@ -22,6 +22,31 @@ class PublicationKind(str, Enum):
     OTHER = "other"
 
 
+def _strip_markup(value: str | None) -> str | None:
+    if not value:
+        return None
+    text = re.sub(r"<[^>]+>", " ", value)
+    text = html.unescape(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text or None
+
+
+def _normalize_doi(value: str | None) -> str | None:
+    if not value:
+        return None
+    value = str(value).strip().lower()
+    value = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", value)
+    return value or None
+
+
+def _normalize_pmid(value: str | None) -> str | None:
+    if not value:
+        return None
+    value = str(value).strip()
+    value = re.sub(r"^https?://pubmed\.ncbi\.nlm\.nih\.gov/", "", value).strip("/")
+    return value or None
+
+
 @dataclass(frozen=True)
 class LiteratureRecord:
     provider: str
@@ -37,10 +62,23 @@ class LiteratureRecord:
     is_retracted: bool
     url: str | None
 
+    def __post_init__(self) -> None:
+        if not self.provider.strip():
+            raise ValueError("literature provider cannot be empty")
+        if not self.provider_id.strip():
+            raise ValueError("literature provider_id cannot be empty")
+        title = _strip_markup(self.title)
+        if not title:
+            raise ValueError("literature title cannot be empty")
+        object.__setattr__(self, "title", title)
+        object.__setattr__(self, "abstract", _strip_markup(self.abstract))
+        object.__setattr__(self, "doi", _normalize_doi(self.doi))
+        object.__setattr__(self, "pmid", _normalize_pmid(self.pmid))
+
     @property
     def identity(self) -> str:
         if self.doi:
-            return f"doi:{self.doi.lower()}"
+            return f"doi:{self.doi}"
         if self.pmid:
             return f"pmid:{self.pmid}"
         normalized = re.sub(r"\W+", " ", self.title.lower()).strip()
@@ -68,52 +106,12 @@ class LiteratureSearchResult:
 
     @property
     def exhaustive_for_query(self) -> bool:
-        """True only when every provider hit is represented in the returned records.
-
-        This is deliberately conservative: malformed/untitled provider rows that are
-        skipped during normalization also prevent an absence claim from being treated
-        as exhaustive.
-        """
+        """True only when every provider hit became a retained normalized record."""
         return self.total_hits <= self.retrieved
 
     @property
     def supports_absence_inference(self) -> bool:
         return self.negative_evidence_eligible and self.exhaustive_for_query
-
-
-def _strip_markup(value: str | None) -> str | None:
-    if not value:
-        return None
-    text = re.sub(r"<[^>]+>", " ", value)
-    text = html.unescape(text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text or None
-
-
-def _normalize_doi(value: str | None) -> str | None:
-    if not value:
-        return None
-    value = value.strip().lower()
-    value = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", value)
-    return value or None
-
-
-def deduplicate_records(records: Iterable[LiteratureRecord]) -> list[LiteratureRecord]:
-    """Deterministically deduplicate by DOI, then PMID, then normalized title."""
-    best: dict[str, LiteratureRecord] = {}
-    for record in records:
-        key = record.identity
-        current = best.get(key)
-        if current is None:
-            best[key] = record
-            continue
-        score = lambda r: (
-            int(bool(r.abstract)), int(bool(r.doi)), int(bool(r.pmid)),
-            int(r.cited_by_count or 0), len(r.title or ""), r.provider,
-        )
-        if score(record) > score(current):
-            best[key] = record
-    return sorted(best.values(), key=lambda r: (-(r.year or 0), r.identity))
 
 
 class _JsonAdapter:
@@ -132,8 +130,26 @@ class _JsonAdapter:
             raise LiteratureError("literature provider returned invalid JSON") from exc
 
 
+def deduplicate_records(records: Iterable[LiteratureRecord]) -> list[LiteratureRecord]:
+    """Deterministically deduplicate by normalized DOI, PMID, then normalized title."""
+    best: dict[str, LiteratureRecord] = {}
+    for record in records:
+        key = record.identity
+        current = best.get(key)
+        if current is None:
+            best[key] = record
+            continue
+        score = lambda r: (
+            int(bool(r.abstract)), int(bool(r.doi)), int(bool(r.pmid)),
+            int(r.cited_by_count or 0), len(r.title or ""), r.provider,
+        )
+        if score(record) > score(current):
+            best[key] = record
+    return sorted(best.values(), key=lambda r: (-(r.year or 0), r.identity))
+
+
 class EuropePMCAdapter(_JsonAdapter):
-    """Europe PMC adapter; complete small result sets may support absence inference."""
+    """Europe PMC adapter; complete result sets may support absence inference."""
 
     SEARCH_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 
@@ -195,10 +211,10 @@ class EuropePMCAdapter(_JsonAdapter):
             records.append(LiteratureRecord(
                 provider="europe_pmc",
                 provider_id=f"{source}:{provider_id}",
-                title=_strip_markup(str(raw.get("title"))) or str(raw.get("title")),
-                abstract=_strip_markup(raw.get("abstractText")),
+                title=str(raw.get("title")),
+                abstract=raw.get("abstractText"),
                 year=year,
-                doi=_normalize_doi(raw.get("doi")),
+                doi=raw.get("doi"),
                 pmid=str(raw.get("pmid")) if raw.get("pmid") else None,
                 journal=raw.get("journalTitle"),
                 kind=self._kind(raw),
@@ -214,13 +230,7 @@ class EuropePMCAdapter(_JsonAdapter):
 
 
 class CrossrefAdapter(_JsonAdapter):
-    """Crossref discovery cross-check.
-
-    `query.bibliographic` is relevance-ranked and can produce very large result
-    universes. Therefore Crossref is treated as positive-prior/metadata evidence
-    only; an absent match in a truncated Crossref response can never support a
-    novelty/absence inference.
-    """
+    """Crossref is positive-prior/metadata discovery only, never absence evidence."""
 
     SEARCH_URL = "https://api.crossref.org/works"
 
@@ -270,20 +280,19 @@ class CrossrefAdapter(_JsonAdapter):
         records: list[LiteratureRecord] = []
         for raw in message.get("items", []) or []:
             titles = raw.get("title") or []
-            title = _strip_markup(str(titles[0])) if titles else None
+            title = str(titles[0]) if titles else None
             if not title:
                 continue
             year = self._year(raw)
             if year is not None and not (from_year <= year <= to_year):
                 continue
-            doi = _normalize_doi(raw.get("DOI"))
             records.append(LiteratureRecord(
                 provider="crossref",
-                provider_id=doi or str(raw.get("URL") or title),
+                provider_id=str(raw.get("DOI") or raw.get("URL") or title),
                 title=title,
-                abstract=_strip_markup(raw.get("abstract")),
+                abstract=raw.get("abstract"),
                 year=year,
-                doi=doi,
+                doi=raw.get("DOI"),
                 pmid=None,
                 journal=(raw.get("container-title") or [None])[0],
                 kind=self._kind(raw),
@@ -315,13 +324,7 @@ def _openalex_abstract(inverted: dict | None) -> str | None:
 
 
 class OpenAlexAdapter(_JsonAdapter):
-    """OpenAlex full-text works search with bounded exhaustive paging.
-
-    OpenAlex's `search` spans work titles, abstracts, and full text and supports
-    Boolean operators plus quoted phrases. We page through the full result set only
-    when it is at or below `max_records`; otherwise the result remains useful for
-    positive prior discovery but is explicitly ineligible as complete absence evidence.
-    """
+    """OpenAlex search with bounded paging and explicit absence-evidence eligibility."""
 
     SEARCH_URL = "https://api.openalex.org/works"
 
@@ -342,31 +345,25 @@ class OpenAlexAdapter(_JsonAdapter):
 
     @staticmethod
     def _record(raw: dict) -> LiteratureRecord | None:
-        title = _strip_markup(str(raw.get("display_name") or raw.get("title") or ""))
-        if not title:
+        title = str(raw.get("display_name") or raw.get("title") or "")
+        if not title.strip():
             return None
         year = raw.get("publication_year")
         try:
             year = int(year) if year is not None else None
         except (TypeError, ValueError):
             year = None
-        doi = _normalize_doi(raw.get("doi"))
         ids = raw.get("ids") or {}
-        pmid_raw = ids.get("pmid")
-        pmid = None
-        if pmid_raw:
-            pmid = re.sub(r"^https?://pubmed\.ncbi\.nlm\.nih\.gov/", "", str(pmid_raw)).strip("/") or None
         primary = raw.get("primary_location") or {}
         source = primary.get("source") or {}
-        provider_id = str(raw.get("id") or doi or title)
         return LiteratureRecord(
             provider="openalex",
-            provider_id=provider_id,
+            provider_id=str(raw.get("id") or raw.get("doi") or title),
             title=title,
             abstract=_openalex_abstract(raw.get("abstract_inverted_index")),
             year=year,
-            doi=doi,
-            pmid=pmid,
+            doi=raw.get("doi"),
+            pmid=ids.get("pmid"),
             journal=source.get("display_name"),
             kind=OpenAlexAdapter._kind(raw),
             cited_by_count=int(raw.get("cited_by_count") or 0),
