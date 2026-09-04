@@ -124,7 +124,7 @@ def hybrid_plan(df=None, **overrides):
     project = asset(
         "physical-data",
         DataOrigin.PROJECT_GENERATED,
-        schema_fields=("primary injury", "root length", "initial size", "unit_id", "block_id", "treatment_code"),
+        schema_fields=("primary injury", "root length", "initial size", "unit_id", "block_id", "treatment_code", "bench_position"),
         sample_ids=("u1", "u2", "u3", "u4"),
     )
     public = asset("public-counts", DataOrigin.PUBLIC_REUSED, sample_ids=("s1", "s2", "s3", "s4"))
@@ -248,13 +248,16 @@ def test_posthoc_exclusion_criterion_blocks():
     assert result.status is DatasetFreezeStatus.BLOCKED
 
 
-def test_frozen_project_schema_must_cover_prespecified_outcomes_covariates_and_metadata():
+def test_frozen_project_schema_must_cover_prespecified_outcomes_covariates_metadata_and_blocking_factors():
     df = design_freeze()
     plan = hybrid_plan(df)
-    project = replace(plan.assets[0], schema_fields=("primary injury", "unit_id"))
+    project = replace(plan.assets[0], schema_fields=("primary injury", "root length", "initial size", "unit_id", "block_id", "treatment_code"))
     plan = replace(plan, assets=(project, plan.assets[1]))
     result = dataset_freeze_court(plan, df)
     assert "design_field_missing_from_frozen_schema" in codes(result)
+    assert result.status is DatasetFreezeStatus.BLOCKED
+    issue = next(i for i in result.issues if i.code == "design_field_missing_from_frozen_schema")
+    assert "bench_position" in issue.reason
 
 
 def test_public_only_route_needs_no_project_generated_asset_or_unit_manifest():
@@ -274,7 +277,7 @@ def test_physical_only_route_rejects_undeclared_public_data():
     project = asset(
         "physical",
         DataOrigin.PROJECT_GENERATED,
-        schema_fields=("primary injury", "root length", "initial size", "unit_id", "block_id", "treatment_code"),
+        schema_fields=("primary injury", "root length", "initial size", "unit_id", "block_id", "treatment_code", "bench_position"),
     )
     public = asset("public", DataOrigin.PUBLIC_REUSED)
     plan = DatasetFreezePlan(

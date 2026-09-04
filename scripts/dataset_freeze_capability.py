@@ -102,7 +102,7 @@ def physical_asset():
         schema_fields=(
             "challenge oxidative injury", "receiver root growth", "extracellular ATP",
             "initial plant size", "pot_id", "block_id", "treatment_code",
-            "sampling_time", "assay_batch",
+            "sampling_time", "assay_batch", "bench_position",
         ),
         sample_ids=tuple(f"pot-{i:02d}" for i in range(1, 13)),
     )
@@ -166,6 +166,19 @@ def main():
         replace(plan, assets=(replace(physical_asset(), schema_fields=("pot_id", "block_id")), public_asset())),
         design_freeze,
     ).status.value
+    attacks["missing_blocking_factor_schema_field"] = dataset_freeze_court(
+        replace(
+            plan,
+            assets=(
+                replace(
+                    physical_asset(),
+                    schema_fields=tuple(x for x in physical_asset().schema_fields if x != "bench_position"),
+                ),
+                public_asset(),
+            ),
+        ),
+        design_freeze,
+    ).status.value
     attacks["wrong_design_binding"] = dataset_freeze_court(
         replace(plan, design_freeze_sha256="3" * 64), design_freeze
     ).status.value
@@ -180,7 +193,7 @@ def main():
         direct_analysis_lock_blocked = True
 
     payload = {
-        "scenario": "v09_general_project_dataset_freeze_hybrid_capability",
+        "scenario": "v101_general_project_dataset_freeze_blocking_factor_repair",
         "court_status": result.status.value,
         "advancement_allowed": result.advancement_allowed,
         "design_freeze_sha256": design_freeze.design_freeze_sha256,
@@ -191,6 +204,7 @@ def main():
             "project_generated": 1,
             "public_reused": 1,
             "public_role": "mechanistic_support_only_not_direct_validation",
+            "frozen_blocking_factors": ["bench_position"],
         },
         "independent_units": {"planned": 12, "retained": 12, "excluded": 0},
         "confirmatory_outcome_blind": frozen.confirmatory_outcome_blind,
@@ -200,7 +214,7 @@ def main():
         "direct_dataset_frozen_to_analysis_locked_blocked": direct_analysis_lock_blocked,
         "next_explicit_state": Stage.ANALYSIS_SPECIFICATION.value,
         "attacks": attacks,
-        "claim_boundary": "dataset_identity_and_prespecification_provenance_only_not_analysis_or_biological_validation",
+        "claim_boundary": "dataset_identity_and_executable_design_field_provenance_only_not_analysis_or_biological_validation",
         "state_freeze_hash_matches": state_freeze.dataset_freeze_sha256 == frozen.dataset_freeze_sha256,
     }
     with open("dataset_freeze_capability.json", "w", encoding="utf-8") as fh:
