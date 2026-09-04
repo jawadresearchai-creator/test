@@ -52,7 +52,10 @@
     "enrichment_background": "all_genes_passing_locked_prefilter",
     "enrichment_provider": "g:Profiler",
     "enrichment_domain_scope": "custom",
-    "enrichment_correction": "fdr"
+    "enrichment_correction": "fdr",
+    "enrichment_all_results_for_mapping_qc": true,
+    "min_query_mapping_fraction": 0.90,
+    "min_background_mapping_fraction": 0.90
   },
   "hard_rejections": [
     "normalized TPM/FPKM passed to DESeq2",
@@ -61,6 +64,8 @@
     "mixed or unknown wheat assembly",
     "query genes outside enrichment background",
     "outcome-dependent threshold changes after analysis lock",
-    "silent outcome-dependent gene exclusion"
+    "silent outcome-dependent gene exclusion",
+    "g:Profiler candidate-query mapping below 90 percent",
+    "g:Profiler tested-gene background mapping below 90 percent"
   ]
 }
