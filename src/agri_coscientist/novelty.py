@@ -62,16 +62,25 @@ class NoveltyReport:
     contextual_records: tuple[PriorAssessment, ...]
     search_snapshot_sha256: str
     interpretation: str
+    negative_evidence_coverage: tuple[dict, ...] = ()
 
 
 @dataclass(frozen=True)
 class CoveragePolicy:
-    required_providers: tuple[str, ...] = ("europe_pmc", "crossref")
+    # All listed providers must be attempted for every family, but only the
+    # explicitly negative-evidence providers are allowed to support absence.
+    required_providers: tuple[str, ...] = ("europe_pmc", "openalex", "crossref")
+    required_negative_evidence_providers: tuple[str, ...] = ("europe_pmc", "openalex")
     required_query_families: tuple[str, ...] = (
         "exact_question", "mechanism", "crop_system", "adjacent_concept"
     )
     min_unique_records: int = 8
     min_records_with_abstract: int = 3
+
+    def __post_init__(self):
+        missing = set(self.required_negative_evidence_providers) - set(self.required_providers)
+        if missing:
+            raise ValueError(f"negative-evidence providers must also be required providers: {sorted(missing)}")
 
 
 def _contains_term(text: str, term: str) -> bool:
@@ -79,8 +88,6 @@ def _contains_term(text: str, term: str) -> bool:
     term = term.lower().strip()
     if not term:
         return False
-    # Phrase/identifier terms should match literally; single words are bounded so
-    # short biological tokens do not accidentally match inside unrelated words.
     if " " in term or any(ch in term for ch in ("-", "+", "/")):
         return term in text
     return re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", text) is not None
@@ -115,6 +122,8 @@ def _snapshot(runs: Iterable[SearchRun], records: Iterable[LiteratureRecord]) ->
                 "to_year": run.result.to_year,
                 "total_hits": run.result.total_hits,
                 "retrieved": run.result.retrieved,
+                "negative_evidence_eligible": run.result.negative_evidence_eligible,
+                "exhaustive_for_query": run.result.exhaustive_for_query,
             }
             for run in runs
         ], key=lambda x: (x["family"], x["provider"], x["query"])),
@@ -134,24 +143,48 @@ def _snapshot(runs: Iterable[SearchRun], records: Iterable[LiteratureRecord]) ->
     return sha256(raw).hexdigest()
 
 
-def _coverage_ok(runs: list[SearchRun], records: list[LiteratureRecord], policy: CoveragePolicy) -> bool:
+def _coverage_details(runs: list[SearchRun], policy: CoveragePolicy) -> tuple[dict, ...]:
+    by_key = {(run.family, run.result.provider): run.result for run in runs}
+    rows = []
+    for family in policy.required_query_families:
+        for provider in policy.required_negative_evidence_providers:
+            result = by_key.get((family, provider))
+            rows.append({
+                "family": family,
+                "provider": provider,
+                "attempted": result is not None,
+                "negative_evidence_eligible": bool(result and result.negative_evidence_eligible),
+                "exhaustive": bool(result and result.exhaustive_for_query),
+                "total_hits": result.total_hits if result else None,
+                "retrieved": result.retrieved if result else None,
+                "supports_absence_inference": bool(result and result.supports_absence_inference),
+            })
+    return tuple(rows)
+
+
+def _coverage_ok(
+    runs: list[SearchRun], records: list[LiteratureRecord], policy: CoveragePolicy
+) -> tuple[bool, tuple[dict, ...]]:
     providers = {run.result.provider for run in runs}
     families = {run.family for run in runs}
+    details = _coverage_details(runs, policy)
     if not set(policy.required_providers).issubset(providers):
-        return False
+        return False, details
     if not set(policy.required_query_families).issubset(families):
-        return False
-    # Every required family must have been attempted through every required provider.
+        return False, details
     attempted = {(run.family, run.result.provider) for run in runs}
     if any((family, provider) not in attempted
            for family in policy.required_query_families
            for provider in policy.required_providers):
-        return False
+        return False, details
+    # Every required negative-evidence provider must be exhaustive for every family.
+    if not details or any(not row["supports_absence_inference"] for row in details):
+        return False, details
     if len(records) < policy.min_unique_records:
-        return False
+        return False, details
     if sum(bool(r.abstract) for r in records) < policy.min_records_with_abstract:
-        return False
-    return True
+        return False, details
+    return True, details
 
 
 def novelty_court(
@@ -166,23 +199,10 @@ def novelty_court(
     families = tuple(sorted({run.family for run in runs}))
     snapshot = _snapshot(runs, records)
 
-    if not _coverage_ok(runs, records, policy):
-        return NoveltyReport(
-            verdict=NoveltyVerdict.INSUFFICIENT_COVERAGE,
-            providers=providers,
-            query_families=families,
-            unique_records=len(records),
-            direct_priors=(), strong_priors=(), contextual_records=(),
-            search_snapshot_sha256=snapshot,
-            interpretation=(
-                "Novelty cannot be evaluated because the frozen search did not satisfy "
-                "the predeclared provider/query-family/evidence coverage policy."
-            ),
-        )
-
     assessments = [assess_record(record, ontology) for record in records]
-    # Preprints count as prior disclosure for novelty. Retraction does not erase
-    # historical disclosure, although it must not be used as reliable mechanistic evidence.
+    # Positive prior evidence is asymmetric: finding a direct prior can defeat a
+    # novelty claim even if some other provider/family is incomplete. Absence, by
+    # contrast, requires the full predeclared negative-evidence coverage policy.
     direct = [a for a in assessments if a.direct_required_match and a.record.kind in {
         PublicationKind.ORIGINAL, PublicationKind.PREPRINT
     }]
@@ -195,24 +215,35 @@ def novelty_court(
     strong.sort(key=sort_key)
     contextual.sort(key=sort_key)
 
+    coverage_ok, coverage_details = _coverage_ok(runs, records, policy)
+
     if direct:
         verdict = NoveltyVerdict.DIRECT_PRIOR_FOUND
         interpretation = (
             "At least one original article or preprint matches every predeclared direct-overlap "
-            "dimension. The current formulation must not advance as novel without evolution."
+            "dimension. The current formulation must not advance as novel without evolution. "
+            "This positive-prior verdict does not depend on complete absence-evidence coverage."
         )
     elif review_direct or strong:
         verdict = NoveltyVerdict.STRONGLY_THREATENED
         interpretation = (
-            "No direct original/preprint prior was identified by the frozen lexical court, but "
-            "near-prior or review-level overlap is strong enough to require deeper reference chasing "
-            "and candidate evolution before a novelty claim can advance."
+            "Near-prior or review-level overlap is already strong enough to require deeper reference "
+            "chasing and candidate evolution before a novelty claim can advance. Positive threat "
+            "evidence remains actionable even if another search provider is incomplete."
+        )
+    elif not coverage_ok:
+        verdict = NoveltyVerdict.INSUFFICIENT_COVERAGE
+        interpretation = (
+            "No direct prior has yet been identified, but the CoScientist is prohibited from making "
+            "a negative novelty inference because one or more predeclared negative-evidence "
+            "provider/query-family searches were missing, ineligible, or not exhaustively retrieved."
         )
     else:
         verdict = NoveltyVerdict.NO_DIRECT_PRIOR_WITHIN_SCOPE
         interpretation = (
-            "No direct prior was found within the frozen providers, query families, date window, "
-            "and retrieved records. This is a scoped search result, not proof of absolute novelty."
+            "No direct prior was found after every required negative-evidence provider/query-family "
+            "search was exhaustively retrieved within the frozen date window. This is still a scoped "
+            "search result, not proof of absolute novelty."
         )
 
     return NoveltyReport(
@@ -225,16 +256,12 @@ def novelty_court(
         contextual_records=tuple(contextual),
         search_snapshot_sha256=snapshot,
         interpretation=interpretation,
+        negative_evidence_coverage=coverage_details,
     )
 
 
 def evolution_actions(report: NoveltyReport, ontology: ConceptOntology) -> tuple[str, ...]:
-    """Return structured research-design degrees of freedom when novelty is threatened.
-
-    This deliberately does not invent a replacement study. It identifies dimensions
-    that the reasoning/model layer should alter and then send back through the full
-    novelty/feasibility courts.
-    """
+    """Return structured research-design degrees of freedom when novelty is threatened."""
     if report.verdict not in {NoveltyVerdict.DIRECT_PRIOR_FOUND, NoveltyVerdict.STRONGLY_THREATENED}:
         return ()
     threats = list(report.direct_priors) + list(report.strong_priors)
