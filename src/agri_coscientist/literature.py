@@ -3,10 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Iterable
-from urllib.parse import quote, urlencode
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 import html
 import json
+import math
 import re
 
 
@@ -59,6 +60,7 @@ class LiteratureSearchResult:
     records: tuple[LiteratureRecord, ...]
     total_hits: int
     requested_rows: int
+    negative_evidence_eligible: bool = True
 
     @property
     def retrieved(self) -> int:
@@ -66,7 +68,17 @@ class LiteratureSearchResult:
 
     @property
     def exhaustive_for_query(self) -> bool:
+        """True only when every provider hit is represented in the returned records.
+
+        This is deliberately conservative: malformed/untitled provider rows that are
+        skipped during normalization also prevent an absence claim from being treated
+        as exhaustive.
+        """
         return self.total_hits <= self.retrieved
+
+    @property
+    def supports_absence_inference(self) -> bool:
+        return self.negative_evidence_eligible and self.exhaustive_for_query
 
 
 def _strip_markup(value: str | None) -> str | None:
@@ -87,11 +99,7 @@ def _normalize_doi(value: str | None) -> str | None:
 
 
 def deduplicate_records(records: Iterable[LiteratureRecord]) -> list[LiteratureRecord]:
-    """Deterministically deduplicate by DOI, then PMID, then normalized title.
-
-    Prefer records with abstracts and richer identifier metadata without altering
-    the scientific content of the selected record.
-    """
+    """Deterministically deduplicate by DOI, then PMID, then normalized title."""
     best: dict[str, LiteratureRecord] = {}
     for record in records:
         key = record.identity
@@ -125,7 +133,7 @@ class _JsonAdapter:
 
 
 class EuropePMCAdapter(_JsonAdapter):
-    """Europe PMC literature adapter with bounded, date-frozen searches."""
+    """Europe PMC adapter; complete small result sets may support absence inference."""
 
     SEARCH_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 
@@ -201,12 +209,18 @@ class EuropePMCAdapter(_JsonAdapter):
         return LiteratureSearchResult(
             provider="europe_pmc", query=frozen_query, from_year=from_year,
             to_year=to_year, records=tuple(records), total_hits=hit_count,
-            requested_rows=rows,
+            requested_rows=rows, negative_evidence_eligible=True,
         )
 
 
 class CrossrefAdapter(_JsonAdapter):
-    """Crossref bibliographic adapter used as an independent discovery cross-check."""
+    """Crossref discovery cross-check.
+
+    `query.bibliographic` is relevance-ranked and can produce very large result
+    universes. Therefore Crossref is treated as positive-prior/metadata evidence
+    only; an absent match in a truncated Crossref response can never support a
+    novelty/absence inference.
+    """
 
     SEARCH_URL = "https://api.crossref.org/works"
 
@@ -280,4 +294,128 @@ class CrossrefAdapter(_JsonAdapter):
         return LiteratureSearchResult(
             provider="crossref", query=query, from_year=from_year, to_year=to_year,
             records=tuple(records), total_hits=total, requested_rows=rows,
+            negative_evidence_eligible=False,
+        )
+
+
+def _openalex_abstract(inverted: dict | None) -> str | None:
+    if not inverted:
+        return None
+    positions: list[tuple[int, str]] = []
+    for token, indexes in inverted.items():
+        for index in indexes or []:
+            try:
+                positions.append((int(index), str(token)))
+            except (TypeError, ValueError):
+                continue
+    if not positions:
+        return None
+    positions.sort()
+    return " ".join(token for _, token in positions)
+
+
+class OpenAlexAdapter(_JsonAdapter):
+    """OpenAlex full-text works search with bounded exhaustive paging.
+
+    OpenAlex's `search` spans work titles, abstracts, and full text and supports
+    Boolean operators plus quoted phrases. We page through the full result set only
+    when it is at or below `max_records`; otherwise the result remains useful for
+    positive prior discovery but is explicitly ineligible as complete absence evidence.
+    """
+
+    SEARCH_URL = "https://api.openalex.org/works"
+
+    @staticmethod
+    def _kind(raw: dict) -> PublicationKind:
+        work_type = str(raw.get("type") or "").lower()
+        crossref_type = str(raw.get("type_crossref") or "").lower()
+        title = str(raw.get("display_name") or raw.get("title") or "").lower()
+        if work_type == "preprint" or crossref_type == "posted-content":
+            return PublicationKind.PREPRINT
+        if work_type == "review" or " review" in title or title.startswith("review"):
+            return PublicationKind.REVIEW
+        if work_type in {"article", "book-chapter", "proceedings-article"} or crossref_type in {
+            "journal-article", "proceedings-article"
+        }:
+            return PublicationKind.ORIGINAL
+        return PublicationKind.OTHER
+
+    @staticmethod
+    def _record(raw: dict) -> LiteratureRecord | None:
+        title = _strip_markup(str(raw.get("display_name") or raw.get("title") or ""))
+        if not title:
+            return None
+        year = raw.get("publication_year")
+        try:
+            year = int(year) if year is not None else None
+        except (TypeError, ValueError):
+            year = None
+        doi = _normalize_doi(raw.get("doi"))
+        ids = raw.get("ids") or {}
+        pmid_raw = ids.get("pmid")
+        pmid = None
+        if pmid_raw:
+            pmid = re.sub(r"^https?://pubmed\.ncbi\.nlm\.nih\.gov/", "", str(pmid_raw)).strip("/") or None
+        primary = raw.get("primary_location") or {}
+        source = primary.get("source") or {}
+        provider_id = str(raw.get("id") or doi or title)
+        return LiteratureRecord(
+            provider="openalex",
+            provider_id=provider_id,
+            title=title,
+            abstract=_openalex_abstract(raw.get("abstract_inverted_index")),
+            year=year,
+            doi=doi,
+            pmid=pmid,
+            journal=source.get("display_name"),
+            kind=OpenAlexAdapter._kind(raw),
+            cited_by_count=int(raw.get("cited_by_count") or 0),
+            is_retracted=bool(raw.get("is_retracted")),
+            url=raw.get("id"),
+        )
+
+    def search(self, query: str, *, from_year: int, to_year: int,
+               rows: int = 100, max_records: int = 1000) -> LiteratureSearchResult:
+        if not query.strip():
+            raise ValueError("literature query cannot be empty")
+        if from_year > to_year:
+            raise ValueError("from_year cannot exceed to_year")
+        if not 1 <= rows <= 100:
+            raise ValueError("OpenAlex rows/per_page must be in [1, 100]")
+        if max_records < rows or max_records > 10000:
+            raise ValueError("max_records must be between rows and 10000")
+
+        base = {
+            "search": query,
+            "filter": f"from_publication_date:{from_year}-01-01,to_publication_date:{to_year}-12-31",
+            "per_page": rows,
+        }
+        records: list[LiteratureRecord] = []
+        total: int | None = None
+        max_pages = math.ceil(max_records / rows)
+        for page in range(1, max_pages + 1):
+            params = dict(base)
+            params["page"] = page
+            payload = self._json(Request(
+                f"{self.SEARCH_URL}?{urlencode(params)}",
+                headers={"Accept": "application/json", "User-Agent": self.user_agent},
+            ))
+            meta = payload.get("meta") or {}
+            if total is None:
+                total = int(meta.get("count") or 0)
+            raw_results = payload.get("results") or []
+            for raw in raw_results:
+                record = self._record(raw)
+                if record is not None and (record.year is None or from_year <= record.year <= to_year):
+                    records.append(record)
+            if not raw_results or len(records) >= (total or 0):
+                break
+            if total is not None and total > max_records and page * rows >= max_records:
+                break
+
+        total = int(total or 0)
+        return LiteratureSearchResult(
+            provider="openalex", query=query, from_year=from_year, to_year=to_year,
+            records=tuple(records), total_hits=total, requested_rows=max_records,
+            negative_evidence_eligible=True,
         )
