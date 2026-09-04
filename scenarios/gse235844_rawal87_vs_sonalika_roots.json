@@ -44,6 +44,7 @@
     "prefilter_total_count": 10,
     "independent_filtering": false,
     "cooks_cutoff": false,
+    "replace_outlier_counts": false,
     "outlier_policy": "report_not_exclude",
     "fdr_method": "BH",
     "fdr_threshold": 0.05,
@@ -64,7 +65,7 @@
     "mixed or unknown wheat assembly",
     "query genes outside enrichment background",
     "outcome-dependent threshold changes after analysis lock",
-    "silent outcome-dependent gene exclusion",
+    "silent outcome-dependent gene exclusion or count replacement",
     "g:Profiler candidate-query mapping below 90 percent",
     "g:Profiler tested-gene background mapping below 90 percent"
   ]
