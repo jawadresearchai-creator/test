@@ -37,8 +37,16 @@ jobs:
           python-version: '3.12.14'
           cache: pip
 
-      - name: Install locked Python kernel and contract tests
-        run: python -m pip install -e '.[test]'
+      - name: Install exact frozen Python scientific stack
+        run: |
+          python - <<'PY' > /tmp/v04-python-requirements.txt
+          import json
+          lock=json.load(open('environments/python-stack-lock.json'))
+          for package, version in lock['packages'].items():
+              print(f'{package}=={version}')
+          PY
+          python -m pip install -r /tmp/v04-python-requirements.txt
+          python -m pip install -e . --no-deps
 
       - name: Verify frozen Python scientific stack
         run: |
