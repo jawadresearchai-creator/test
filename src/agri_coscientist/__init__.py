@@ -26,6 +26,22 @@ from .data_fitness import (
     evaluate_general_data_fitness,
     evaluate_layered_data_fitness,
 )
+from .design import (
+    AllocationMethod,
+    DesignCourtResult,
+    DesignFreeze,
+    DesignGrade,
+    DesignStatus,
+    InferenceIntent,
+    OutcomeSpec,
+    OutcomeTier,
+    PhysicalDesign,
+    PublicDatasetDesign,
+    StudyDesign,
+    build_design_freeze,
+    design_court,
+    freeze_project_design,
+)
 
 __all__ = [
     "ProjectState", "Stage", "StudyMode", "OmicsMetadata", "OmicsFitness",
@@ -36,5 +52,8 @@ __all__ = [
     "DataFitnessDimension", "DataFitnessGrade", "DataFitnessPolicy",
     "DataFitnessProfile", "DataFitnessStatus", "DataUseRole",
     "DatasetFitnessReport", "data_fitness_court", "evaluate_general_data_fitness",
-    "evaluate_layered_data_fitness"
+    "evaluate_layered_data_fitness", "AllocationMethod", "DesignCourtResult",
+    "DesignFreeze", "DesignGrade", "DesignStatus", "InferenceIntent",
+    "OutcomeSpec", "OutcomeTier", "PhysicalDesign", "PublicDatasetDesign",
+    "StudyDesign", "build_design_freeze", "design_court", "freeze_project_design"
 ]
