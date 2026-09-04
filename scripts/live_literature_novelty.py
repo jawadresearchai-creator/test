@@ -3,7 +3,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from agri_coscientist.literature import CrossrefAdapter, EuropePMCAdapter, deduplicate_records
+from agri_coscientist.literature import (
+    CrossrefAdapter,
+    EuropePMCAdapter,
+    OpenAlexAdapter,
+    deduplicate_records,
+)
 from agri_coscientist.novelty import (
     ConceptOntology,
     NoveltyVerdict,
@@ -18,7 +23,7 @@ FROM_YEAR = 2024
 TO_YEAR = 2026
 
 # Capability scenario only. The ontology and search families are frozen before
-# the retrieved records are interpreted by the novelty court.
+# retrieved records are interpreted by the novelty court.
 ONTOLOGY = ConceptOntology(
     dimensions={
         "crop": ("wheat", "triticum aestivum"),
@@ -60,12 +65,17 @@ def serialize_assessment(a):
 
 def main() -> None:
     epmc = EuropePMCAdapter()
+    openalex = OpenAlexAdapter()
     crossref = CrossrefAdapter()
-    adapters = {"europe_pmc": epmc, "crossref": crossref}
+    adapters = {
+        "europe_pmc": epmc,
+        "openalex": openalex,
+        "crossref": crossref,
+    }
 
-    # Provider sentinel: a current known eATP/root article must be recoverable by
-    # exact DOI from Europe PMC. Crossref is independently exercised below on all
-    # four query families.
+    # Europe PMC sentinel proves the live provider can recover a known recent
+    # eATP/root article by exact DOI. OpenAlex and Crossref are independently
+    # exercised below for every frozen query family.
     sentinel = epmc.search(
         f"DOI:{KNOWN_EATP_DOI}", from_year=FROM_YEAR, to_year=TO_YEAR, rows=10
     )
@@ -79,7 +89,15 @@ def main() -> None:
     per_run = []
     for family, query in QUERY_FAMILIES.items():
         for provider, adapter in adapters.items():
-            result = adapter.search(query, from_year=FROM_YEAR, to_year=TO_YEAR, rows=100)
+            if provider == "openalex":
+                result = adapter.search(
+                    query, from_year=FROM_YEAR, to_year=TO_YEAR,
+                    rows=100, max_records=1000,
+                )
+            else:
+                result = adapter.search(
+                    query, from_year=FROM_YEAR, to_year=TO_YEAR, rows=100
+                )
             runs.append(SearchRun(family=family, result=result))
             per_run.append({
                 "family": family,
@@ -87,20 +105,26 @@ def main() -> None:
                 "query": result.query,
                 "total_hits": result.total_hits,
                 "retrieved": result.retrieved,
+                "negative_evidence_eligible": result.negative_evidence_eligible,
                 "exhaustive_for_query": result.exhaustive_for_query,
+                "supports_absence_inference": result.supports_absence_inference,
             })
 
     all_records = deduplicate_records(r for run in runs for r in run.result.records)
-    if not any(r.provider == "europe_pmc" for r in all_records):
-        raise RuntimeError("live discovery returned no Europe PMC records")
-    if not any(r.provider == "crossref" for r in all_records):
-        raise RuntimeError("live discovery returned no Crossref records")
+    for provider in adapters:
+        if not any(r.provider == provider for r in all_records):
+            raise RuntimeError(f"live discovery returned no {provider} records")
 
     report = novelty_court(runs, ONTOLOGY)
     if report.verdict == NoveltyVerdict.INSUFFICIENT_COVERAGE:
+        failed = [
+            row for row in report.negative_evidence_coverage
+            if not row["supports_absence_inference"]
+        ]
         raise RuntimeError(
-            f"live novelty search failed coverage policy: providers={report.providers}, "
-            f"families={report.query_families}, unique_records={report.unique_records}"
+            "live novelty search failed absence-evidence coverage policy: "
+            f"providers={report.providers}, families={report.query_families}, "
+            f"unique_records={report.unique_records}, failed={failed}"
         )
 
     payload = {
@@ -115,6 +139,7 @@ def main() -> None:
             "records": [r.identity for r in sentinel.records],
         },
         "search_runs": per_run,
+        "negative_evidence_coverage": list(report.negative_evidence_coverage),
         "unique_records": report.unique_records,
         "records_with_abstract": sum(bool(r.abstract) for r in all_records),
         "publication_kinds": {
@@ -131,6 +156,7 @@ def main() -> None:
             "allowed": "scoped novelty-screen result within the frozen providers/query families/date window",
             "prohibited": [
                 "absolute novelty proven by absence of hits",
+                "using truncated Crossref results as negative novelty evidence",
                 "treating a review as an original empirical prior",
                 "ignoring a matching preprint as prior disclosure",
                 "advancing a direct-prior candidate without evolution and rerun",
