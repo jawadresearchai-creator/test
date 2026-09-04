@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 from pathlib import Path
 
 from agri_coscientist.annotation import BUILD_REGISTRY, EnsemblRestAdapter
-from agri_coscientist.enrichment import GProfilerAdapter, GProfilerProfileResponse
+from agri_coscientist.enrichment import GProfilerAdapter, GProfilerConversionCoverage
 from agri_coscientist.scenario import ScenarioError
 
 
@@ -31,7 +32,7 @@ def write_results(path: Path, rows) -> None:
             "source": r.source,
             "q_value": r.q_value,
             "query_size": r.query_size,
-            "background_size": r.background_size,
+            "statistical_domain_size": r.background_size,
             "term_size": r.term_size,
             "intersection_size": r.intersection_size,
             "intersection": list(r.intersection),
@@ -62,41 +63,37 @@ def resolve_build_sentinel(background: list[str], build):
     )
 
 
-def mapping_qc(
-    response: GProfilerProfileResponse,
-    query: list[str],
-    background: list[str],
+def _id_list_hash(values: tuple[str, ...]) -> str:
+    payload = "\n".join(values).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def coverage_summary(
+    coverage: GProfilerConversionCoverage,
     *,
-    min_query_fraction: float,
-    min_background_fraction: float,
+    minimum_fraction: float,
+    label: str,
 ) -> dict:
-    if not response.results:
+    if coverage.mapping_fraction < minimum_fraction:
         raise ScenarioError(
-            "g:Profiler returned no GO result rows with all_results enabled; mapping coverage cannot be established"
+            f"g:Convert {label} unambiguous mapping coverage {coverage.mapping_fraction:.3f} "
+            f"is below locked minimum {minimum_fraction:.3f}"
         )
-    mapped_query = max(r.query_size for r in response.results)
-    mapped_background = max(r.background_size for r in response.results)
-    query_fraction = min(1.0, mapped_query / len(query))
-    background_fraction = min(1.0, mapped_background / len(background))
-    if query_fraction < min_query_fraction:
-        raise ScenarioError(
-            f"g:Profiler candidate-query mapping coverage {query_fraction:.3f} is below locked minimum {min_query_fraction:.3f}"
-        )
-    if background_fraction < min_background_fraction:
-        raise ScenarioError(
-            f"g:Profiler background mapping coverage {background_fraction:.3f} is below locked minimum {min_background_fraction:.3f}"
-        )
-    genes_metadata = response.meta.get("genes_metadata") if isinstance(response.meta, dict) else None
     return {
-        "input_query_genes": len(query),
-        "mapped_query_genes_effective": mapped_query,
-        "query_mapping_fraction": query_fraction,
-        "input_background_genes": len(background),
-        "mapped_background_genes_effective": mapped_background,
-        "background_mapping_fraction": background_fraction,
-        "min_query_mapping_fraction": min_query_fraction,
-        "min_background_mapping_fraction": min_background_fraction,
-        "provider_genes_metadata": genes_metadata,
+        "method": "g:Convert->ENSG",
+        "input_genes": coverage.input_size,
+        "unambiguously_mapped_genes": coverage.mapped_size,
+        "mapping_fraction": coverage.mapping_fraction,
+        "minimum_mapping_fraction": minimum_fraction,
+        "unmapped_count": len(coverage.unmapped_ids),
+        "ambiguous_count": len(coverage.ambiguous_ids),
+        "unmapped_ids_sha256": _id_list_hash(coverage.unmapped_ids),
+        "ambiguous_ids_sha256": _id_list_hash(coverage.ambiguous_ids),
+        "unmapped_examples": list(coverage.unmapped_ids[:25]),
+        "ambiguous_examples": list(coverage.ambiguous_ids[:25]),
+        "target_namespace": coverage.target_namespace,
+        "chunks": coverage.chunks,
+        "provider_result_rows": coverage.provider_result_rows,
         "status": "PASS",
     }
 
@@ -164,9 +161,25 @@ def main() -> None:
     gp = GProfilerAdapter(user_agent="Agriculture-CoScientist-test/0.4")
     versions = gp.data_versions(build)
 
+    background_coverage = gp.convert_coverage(background, build)
+    background_qc = coverage_summary(
+        background_coverage,
+        minimum_fraction=min_background_mapping,
+        label="tested-background",
+    )
+    (out_dir / "gprofiler_background_mapping_qc.json").write_text(
+        json.dumps(background_qc, indent=2, sort_keys=True) + "\n"
+    )
+
     directional = {}
     for direction, query in (("up", up), ("down", down)):
         if query:
+            query_coverage = gp.convert_coverage(query, build)
+            query_qc = coverage_summary(
+                query_coverage,
+                minimum_fraction=min_query_mapping,
+                label=f"{direction}-candidate-query",
+            )
             response = gp.profile_response(
                 query,
                 background,
@@ -175,41 +188,43 @@ def main() -> None:
                 user_threshold=fdr,
                 all_results=True,
             )
-            qc = mapping_qc(
-                response,
-                query,
-                background,
-                min_query_fraction=min_query_mapping,
-                min_background_fraction=min_background_mapping,
-            )
             significant = [
                 r for r in response.results
                 if r.q_value <= fdr and (r.raw or {}).get("significant", True) is not False
             ]
-            meta_payload = {
-                "mapping_qc": qc,
+            statistical_domains = sorted({r.background_size for r in response.results})
+            metadata_payload = {
+                "query_mapping_qc": query_qc,
+                "background_mapping_qc": background_qc,
                 "provider_meta": response.meta,
                 "all_result_rows": len(response.results),
                 "significant_result_rows": len(significant),
+                "statistical_domain_sizes": statistical_domains,
+                "note": "statistical_domain_sizes are hypergeometric domain sizes, not identifier-mapping counts",
             }
-            (out_dir / f"gprofiler_{direction}_metadata.json").write_text(
-                json.dumps(meta_payload, indent=2, sort_keys=True) + "\n"
-            )
         else:
             significant = []
-            qc = {
-                "input_query_genes": 0,
+            query_qc = {
+                "method": "g:Convert->ENSG",
+                "input_genes": 0,
+                "minimum_mapping_fraction": min_query_mapping,
                 "status": "NOT_APPLICABLE_NO_CANDIDATES",
-                "min_query_mapping_fraction": min_query_mapping,
-                "min_background_mapping_fraction": min_background_mapping,
             }
-            (out_dir / f"gprofiler_{direction}_metadata.json").write_text(
-                json.dumps({"mapping_qc": qc, "provider_meta": None}, indent=2, sort_keys=True) + "\n"
-            )
+            metadata_payload = {
+                "query_mapping_qc": query_qc,
+                "background_mapping_qc": background_qc,
+                "provider_meta": None,
+                "all_result_rows": 0,
+                "significant_result_rows": 0,
+                "statistical_domain_sizes": [],
+            }
+        (out_dir / f"gprofiler_{direction}_metadata.json").write_text(
+            json.dumps(metadata_payload, indent=2, sort_keys=True) + "\n"
+        )
         write_results(out_dir / f"gprofiler_{direction}.json", significant)
         directional[direction] = {
             "query_genes": len(query),
-            "mapping_qc": qc,
+            "query_mapping_qc": query_qc,
             "significant_terms": len(significant),
             "top_terms": [
                 {"term_id": r.term_id, "name": r.name, "source": r.source, "q_value": r.q_value}
@@ -231,6 +246,7 @@ def main() -> None:
         },
         "background_genes": len(background),
         "background_definition": "all genes passing locked total-count prefilter",
+        "background_mapping_qc": background_qc,
         "thresholds": {
             "padj": fdr,
             "abs_log2FoldChange": effect,
