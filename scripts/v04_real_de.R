@@ -52,7 +52,7 @@ read_featurecounts <- function(asset_id, group_name, expected_reps) {
   if (any(abs(counts - round(counts)) > 1e-8)) stop(paste(asset_id, "contains non-integer counts"))
   storage.mode(counts) <- "integer"
   colnames(counts) <- paste0(gsub("[^A-Za-z0-9]+", "_", group_name), "_rep", seq_len(ncol(counts)))
-  list(gene = tab$Geneid, counts = counts)
+  list(gene = as.character(tab$Geneid), counts = counts)
 }
 
 groups <- manifest$contrast$groups
@@ -60,7 +60,15 @@ if (length(groups) != 2) stop("exactly two groups are required")
 left <- read_featurecounts(groups[[1]]$asset_id, groups[[1]]$name, groups[[1]]$expected_replicates)
 right <- read_featurecounts(groups[[2]]$asset_id, groups[[2]]$name, groups[[2]]$expected_replicates)
 
-if (!identical(left$gene, right$gene)) stop("featureCounts gene universes/order differ across frozen assets")
+if (!setequal(left$gene, right$gene)) stop("featureCounts gene universes differ across frozen assets")
+if (!identical(left$gene, right$gene)) {
+  order_right <- match(left$gene, right$gene)
+  if (anyNA(order_right)) stop("failed to align featureCounts gene order by Geneid")
+  right$gene <- right$gene[order_right]
+  right$counts <- right$counts[order_right, , drop = FALSE]
+}
+if (!identical(left$gene, right$gene)) stop("featureCounts Geneid alignment failed")
+
 count_matrix <- cbind(left$counts, right$counts)
 rownames(count_matrix) <- left$gene
 
