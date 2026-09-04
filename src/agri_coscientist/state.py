@@ -15,6 +15,8 @@ class Stage(str, Enum):
     DATA_FITNESS = "data_fitness"
     DESIGN = "design"
     DESIGN_FROZEN = "design_frozen"
+    DATASET_FROZEN = "dataset_frozen"
+    ANALYSIS_SPECIFICATION = "analysis_specification"
     ANALYSIS_LOCKED = "analysis_locked"
     ANALYSIS = "analysis"
     SYNTHESIS = "evidence_synthesis"
@@ -29,7 +31,9 @@ _ALLOWED = {
     Stage.FEASIBILITY: {Stage.DATA_FITNESS, Stage.DISCOVERY},
     Stage.DATA_FITNESS: {Stage.DESIGN, Stage.DISCOVERY},
     Stage.DESIGN: {Stage.DESIGN_FROZEN, Stage.DISCOVERY},
-    Stage.DESIGN_FROZEN: {Stage.ANALYSIS_LOCKED, Stage.DESIGN},
+    Stage.DESIGN_FROZEN: {Stage.DATASET_FROZEN, Stage.DESIGN},
+    Stage.DATASET_FROZEN: {Stage.ANALYSIS_SPECIFICATION, Stage.DESIGN},
+    Stage.ANALYSIS_SPECIFICATION: {Stage.ANALYSIS_LOCKED, Stage.DATASET_FROZEN, Stage.DESIGN},
     Stage.ANALYSIS_LOCKED: {Stage.ANALYSIS},
     Stage.ANALYSIS: {Stage.SYNTHESIS, Stage.DESIGN},
     Stage.SYNTHESIS: {Stage.PUBLICATION, Stage.ANALYSIS, Stage.DESIGN},
