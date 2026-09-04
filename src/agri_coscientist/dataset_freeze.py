@@ -169,6 +169,8 @@ def _required_project_fields(design_freeze: DesignFreeze) -> set[str]:
     }
     required.update(str(x).strip() for x in payload.get("covariates", []) if str(x).strip())
     required.update(str(x).strip() for x in payload.get("metadata_fields", []) if str(x).strip())
+    physical = payload.get("physical") or {}
+    required.update(str(x).strip() for x in physical.get("blocking_factors", []) if str(x).strip())
     return required
 
 
