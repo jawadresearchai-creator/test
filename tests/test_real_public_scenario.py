@@ -98,6 +98,27 @@ def test_featurecounts_header_requires_exact_replicate_count():
         validate_featurecounts_header(header, 2, "Rawal-87")
 
 
+def test_standard_featurecounts_annotation_columns_are_not_counted_as_replicates():
+    payload = _gz(
+        "Geneid\tChr\tStart\tEnd\tStrand\tLength\tRawal_rep1\tRawal_rep2\tRawal_rep3\n"
+        "G1\t1A\t100\t200\t+\t101\t10\t12\t9\n"
+    )
+    header = read_gzip_header_bytes(payload)
+    assert validate_featurecounts_header(header, 3, "Rawal-87") == (
+        "Rawal_rep1", "Rawal_rep2", "Rawal_rep3"
+    )
+
+
+def test_unknown_extra_featurecounts_column_is_not_silently_ignored():
+    payload = _gz(
+        "Geneid\tChr\tStart\tEnd\tStrand\tLength\tUnexpected\tRawal_rep1\tRawal_rep2\tRawal_rep3\n"
+        "G1\t1A\t100\t200\t+\t101\t999\t10\t12\t9\n"
+    )
+    header = read_gzip_header_bytes(payload)
+    with pytest.raises(ScenarioError):
+        validate_featurecounts_header(header, 3, "Rawal-87")
+
+
 def test_dataset_freeze_and_analysis_lock_are_deterministic_and_separate():
     a = FrozenAsset("Rawal-87_roots", "https://example/a.gz", "a" * 64, 100, ("Geneid", "r1", "r2", "r3", "Length"))
     b = FrozenAsset("Sonalika_roots", "https://example/b.gz", "b" * 64, 120, ("Geneid", "s1", "s2", "s3", "Length"))
