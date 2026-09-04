@@ -68,6 +68,30 @@ def check_execution_context(lock: dict, marker: dict) -> dict:
     return locked
 
 
+def validate_conversion_qc(qc: dict, expected_input: int, minimum: float, label: str) -> None:
+    if qc.get("method") != "g:Convert->ENSG" or qc.get("status") != "PASS":
+        raise ScenarioError(f"{label} g:Convert mapping QC did not pass")
+    if int(qc.get("input_genes", -1)) != expected_input:
+        raise ScenarioError(f"{label} mapping-QC input size mismatch")
+    mapped = int(qc.get("unambiguously_mapped_genes", -1))
+    unmapped = int(qc.get("unmapped_count", -1))
+    ambiguous = int(qc.get("ambiguous_count", -1))
+    if min(mapped, unmapped, ambiguous) < 0 or mapped + unmapped + ambiguous != expected_input:
+        raise ScenarioError(f"{label} mapping categories do not partition the input gene list")
+    observed_fraction = float(qc.get("mapping_fraction", -1))
+    expected_fraction = mapped / expected_input if expected_input else 0.0
+    if abs(observed_fraction - expected_fraction) > 1e-12:
+        raise ScenarioError(f"{label} mapping fraction is internally inconsistent")
+    if observed_fraction < minimum or observed_fraction > 1.0:
+        raise ScenarioError(f"{label} mapping coverage is below the locked minimum")
+    if float(qc.get("minimum_mapping_fraction", -1)) != minimum:
+        raise ScenarioError(f"{label} mapping threshold differs from lock")
+    for hash_key in ("unmapped_ids_sha256", "ambiguous_ids_sha256"):
+        value = qc.get(hash_key)
+        if not isinstance(value, str) or len(value) != 64:
+            raise ScenarioError(f"{label} missing deterministic {hash_key}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("run_dir", type=Path)
@@ -194,6 +218,12 @@ def main() -> None:
     if float(thresholds.get("min_background_mapping_fraction", -1)) != min_background_mapping:
         raise ScenarioError("background mapping threshold differs from lock")
 
+    background_qc = enrichment.get("background_mapping_qc") or {}
+    background_qc_file = load_json(run_dir / "results" / "enrichment" / "gprofiler_background_mapping_qc.json")
+    if background_qc_file != background_qc:
+        raise ScenarioError("background mapping QC file differs from enrichment summary")
+    validate_conversion_qc(background_qc, len(rows), min_background_mapping, "background")
+
     expected_up: set[str] = set()
     expected_down: set[str] = set()
     for row in rows:
@@ -217,37 +247,40 @@ def main() -> None:
         direction_summary = enrichment["directions"][direction]
         if int(direction_summary["query_genes"]) != len(expected_genes):
             raise ScenarioError(f"{direction}-enrichment query was altered after DE")
-        qc = direction_summary.get("mapping_qc") or {}
+        query_qc = direction_summary.get("query_mapping_qc") or {}
         metadata = load_json(run_dir / "results" / "enrichment" / f"gprofiler_{direction}_metadata.json")
-        if metadata.get("mapping_qc") != qc:
-            raise ScenarioError(f"{direction} mapping-QC metadata differs from enrichment summary")
+        if metadata.get("query_mapping_qc") != query_qc:
+            raise ScenarioError(f"{direction} query mapping QC metadata differs from enrichment summary")
+        if metadata.get("background_mapping_qc") != background_qc:
+            raise ScenarioError(f"{direction} background mapping QC metadata differs from common background QC")
         term_rows = load_json(run_dir / "results" / "enrichment" / f"gprofiler_{direction}.json")
         if len(term_rows) != int(direction_summary["significant_terms"]):
             raise ScenarioError(f"{direction} significant-term count differs from result file")
+        if int(metadata.get("significant_result_rows", -1)) != len(term_rows):
+            raise ScenarioError(f"{direction} metadata/result significant-term counts differ")
         for term in term_rows:
             q = float(term["q_value"])
             if not 0 <= q <= fdr:
                 raise ScenarioError(f"{direction} enrichment contains a term outside locked FDR threshold")
+            domain = int(term.get("statistical_domain_size", 0))
+            if domain <= 0:
+                raise ScenarioError(f"{direction} enrichment term lacks a valid statistical domain size")
         if expected_genes:
-            if qc.get("status") != "PASS":
-                raise ScenarioError(f"{direction} mapping QC did not pass")
-            if int(qc.get("input_query_genes", -1)) != len(expected_genes):
-                raise ScenarioError(f"{direction} mapping QC query size differs from DE candidates")
-            if int(qc.get("input_background_genes", -1)) != len(rows):
-                raise ScenarioError(f"{direction} mapping QC background differs from tested universe")
-            qfrac = float(qc.get("query_mapping_fraction", -1))
-            bfrac = float(qc.get("background_mapping_fraction", -1))
-            if not min_query_mapping <= qfrac <= 1.0:
-                raise ScenarioError(f"{direction} query mapping coverage is below locked minimum")
-            if not min_background_mapping <= bfrac <= 1.0:
-                raise ScenarioError(f"{direction} background mapping coverage is below locked minimum")
+            validate_conversion_qc(query_qc, len(expected_genes), min_query_mapping, f"{direction} query")
             if not isinstance(metadata.get("provider_meta"), dict):
-                raise ScenarioError(f"{direction} raw g:Profiler metadata is missing")
+                raise ScenarioError(f"{direction} raw g:Profiler enrichment metadata is missing")
+            if int(metadata.get("all_result_rows", -1)) < len(term_rows):
+                raise ScenarioError(f"{direction} all-results count is smaller than significant result count")
+            domains = metadata.get("statistical_domain_sizes")
+            if not isinstance(domains, list) or not all(int(x) > 0 for x in domains):
+                raise ScenarioError(f"{direction} statistical-domain diagnostics are invalid")
         else:
-            if qc.get("status") != "NOT_APPLICABLE_NO_CANDIDATES":
+            if query_qc.get("status") != "NOT_APPLICABLE_NO_CANDIDATES":
                 raise ScenarioError(f"{direction} zero-candidate mapping status is invalid")
             if term_rows:
                 raise ScenarioError(f"{direction} has enrichment terms despite zero candidate genes")
+            if metadata.get("provider_meta") is not None:
+                raise ScenarioError(f"{direction} should not have provider enrichment metadata with zero candidates")
 
     candidate_rows = read_csv(run_dir / "results" / "deseq2_enrichment_candidates.csv")
     candidate_genes = {r["Geneid"] for r in candidate_rows}
@@ -274,8 +307,9 @@ def main() -> None:
             "fixed_prefilter_BH_and_outlier_policy": "PASS",
             "candidate_reconstruction": "PASS",
             "custom_background_identity": "PASS",
-            "gprofiler_mapping_coverage": "PASS",
+            "gconvert_identifier_mapping_coverage": "PASS",
             "gprofiler_provider_metadata": "PASS",
+            "statistical_domain_not_used_as_mapping_metric": "PASS",
             "directional_enrichment_integrity": "PASS",
             "genome_build_binding": "PASS",
         },
