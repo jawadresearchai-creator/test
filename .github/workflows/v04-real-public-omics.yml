@@ -29,6 +29,7 @@ jobs:
     env:
       GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
       RUN_DIR: runs/v04-${{ github.run_id }}
+      PYTHONPATH: ${{ github.workspace }}/src
     steps:
       - uses: actions/checkout@v4
 
@@ -46,7 +47,6 @@ jobs:
               print(f'{package}=={version}')
           PY
           python -m pip install -r /tmp/v04-python-requirements.txt
-          python -m pip install -e . --no-deps
 
       - name: Verify frozen Python scientific stack
         run: |
