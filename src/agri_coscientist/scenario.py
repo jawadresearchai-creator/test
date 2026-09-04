@@ -12,6 +12,16 @@ class ScenarioError(RuntimeError):
     pass
 
 
+FEATURECOUNTS_ANNOTATION_COLUMNS = {
+    "Geneid",
+    "Chr",
+    "Start",
+    "End",
+    "Strand",
+    "Length",
+}
+
+
 @dataclass(frozen=True)
 class FrozenAsset:
     asset_id: str
@@ -41,17 +51,20 @@ def read_gzip_header_bytes(payload: bytes) -> tuple[str, ...]:
     except Exception as exc:
         raise ScenarioError("count asset is not a readable gzip text file") from exc
     header = tuple(line.split("\t"))
-    if len(header) < 3 or header[0] != "Geneid":
-        raise ScenarioError(f"unexpected featureCounts header: {header[:5]!r}")
+    if len(header) < 2 or header[0] != "Geneid":
+        raise ScenarioError(f"unexpected featureCounts header: {header[:6]!r}")
     return header
 
 
 def count_columns(header: Iterable[str]) -> tuple[str, ...]:
-    return tuple(c for c in header if c not in {"Geneid", "Length"})
+    return tuple(c for c in header if c not in FEATURECOUNTS_ANNOTATION_COLUMNS)
 
 
 def validate_featurecounts_header(header: Iterable[str], expected_replicates: int, label: str) -> tuple[str, ...]:
-    cols = count_columns(tuple(header))
+    header = tuple(header)
+    if not header or header[0] != "Geneid":
+        raise ScenarioError(f"{label}: featureCounts header must begin with Geneid")
+    cols = count_columns(header)
     if len(cols) != expected_replicates:
         raise ScenarioError(
             f"{label}: expected {expected_replicates} count columns, found {len(cols)}: {cols!r}"
