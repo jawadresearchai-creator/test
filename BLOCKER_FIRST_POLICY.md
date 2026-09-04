@@ -33,15 +33,17 @@ Every blocking issue must carry:
 - current state: `OPEN`, `RESOLVED`, or `WAIVED`;
 - resolution evidence, or explicit human waiver authority and reason.
 
-## Current blocker
-
-`RUNNER_UNAVAILABLE`
+## Resolved blocker record — RUNNER_UNAVAILABLE
 
 - Class: `BLOCKING`
-- State: `OPEN`
-- Evidence: recent GitHub Actions attempts create jobs with no assigned runner and zero executed steps.
-- Current resolution attempt: change `jawadresearchai-creator/test` from private to public so standard GitHub-hosted runners no longer consume the private-repository Actions minute quota.
-- Resolution criterion: a fresh authoritative workflow job receives a GitHub-hosted runner and executes at least one workflow step.
-- Verification method: inspect the GitHub Actions job evidence through the connected GitHub API.
+- State: `RESOLVED`
+- Original evidence: while `jawadresearchai-creator/test` was private, repeated GitHub Actions attempts created jobs with no assigned runner and zero executed steps.
+- Resolution action: the user explicitly authorized and performed the repository visibility change from private to public on 2026-09-04.
+- Resolution criterion: a fresh authoritative workflow job must receive a GitHub-hosted runner and execute at least one workflow step.
+- Verification evidence: repository visibility was confirmed as `public`; rerun job `100915918034` immediately received a runner and executed setup/checkout/Python steps; PR #3 workflow run `33838652324` subsequently assigned runners to all five jobs and completed every job successfully, including the real v0.4 public-omics workflow.
+- Scientific verification: the real v0.4 job downloaded/froze the public count assets, created the pre-outcome Analysis Lock, executed DESeq2, executed exact-build g:Profiler enrichment, passed the hostile audit, and uploaded the retained evidence artifact.
+- Resolution conclusion: `RUNNER_UNAVAILABLE` is resolved. It must not be reopened merely because an individual future job fails for a code, provider, or scientific reason; those require their own blocker records.
 
-Until this resolution criterion passes, v0.4 must not advance to v0.5 or another downstream phase.
+## Current blocking state
+
+No blocking issue is currently OPEN as of the v0.4 merge closure. Any newly discovered blocking issue must be registered before downstream phase advancement.
