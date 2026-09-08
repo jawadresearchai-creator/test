@@ -1,0 +1,215 @@
+name: R6 B01 Joplin Filesystem Historical Smoke
+
+on:
+  push:
+    branches:
+      - r6-benchmark-harness-2026-09-08
+    paths:
+      - '.github/workflows/r6-b01-joplin-smoke.yml'
+      - 'benchmarks/r6-b01-trigger.txt'
+  workflow_dispatch:
+
+jobs:
+  b01-oracle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        case:
+          - name: pre_fix
+            sha: 134064c8296880d63b64ddc6e3743fc6dc926cf7
+            expect: fail
+          - name: human_fix
+            sha: 385a78dc208ab426b2a0b0abb254e7978e77d8c6
+            expect: pass
+    steps:
+      - name: Checkout benchmark harness
+        uses: actions/checkout@v4
+
+      - name: Checkout exact historical Joplin source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --filter=blob:none --no-checkout https://github.com/laurent22/joplin.git joplin
+          cd joplin
+          git checkout "${{ matrix.case.sha }}"
+          test "$(git rev-parse HEAD)" = "${{ matrix.case.sha }}"
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build isolated historical oracle package
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p b01-oracle
+          cp joplin/packages/app-mobile/utils/fs-driver/fs-driver-rn.ts b01-oracle/fs-driver-rn.ts
+
+          cat > b01-oracle/package.json <<'JSON'
+          {
+            "private": true,
+            "scripts": { "test": "jest" },
+            "devDependencies": {
+              "@types/jest": "29.5.14",
+              "jest": "29.7.0",
+              "ts-jest": "29.4.1",
+              "typescript": "5.8.3"
+            }
+          }
+          JSON
+
+          cat > b01-oracle/jest.config.cjs <<'JS'
+          module.exports = {
+            testEnvironment: 'node',
+            transform: {
+              '^.+\\.tsx?$': ['ts-jest', { diagnostics: false, isolatedModules: true }],
+            },
+            moduleFileExtensions: ['ts', 'js'],
+          };
+          JS
+
+          # Local imports are irrelevant to readDirStats but must resolve when the
+          # exact historical source module is loaded.
+          cat > b01-oracle/tarCreate.ts <<'TS'
+          export default async function tarCreate() { throw new Error('not used by B01 oracle'); }
+          TS
+          cat > b01-oracle/tarExtract.ts <<'TS'
+          export default async function tarExtract() { throw new Error('not used by B01 oracle'); }
+          TS
+
+          cat > b01-oracle/oracle-mocks.ts <<'TS'
+          export const mockSaf = { listFiles: jest.fn() };
+          export const mockRNFS = { readDir: jest.fn() };
+
+          jest.mock('@joplin/lib/fs-driver-base', () => ({
+            __esModule: true,
+            default: class FsDriverBase {},
+          }), { virtual: true });
+          jest.mock('rn-fetch-blob', () => ({ __esModule: true, default: { fs: {} } }), { virtual: true });
+          jest.mock('@dr.pogodin/react-native-fs', () => mockRNFS, { virtual: true });
+          jest.mock('@joplin/react-native-saf-x', () => ({
+            __esModule: true,
+            default: mockSaf,
+            openDocumentTree: jest.fn(),
+          }), { virtual: true });
+          jest.mock('react-native', () => ({ Platform: { OS: 'android' } }), { virtual: true });
+          jest.mock('@joplin/lib/JoplinError', () => ({ __esModule: true, default: class JoplinError extends Error {} }), { virtual: true });
+          jest.mock('md5', () => jest.fn(() => 'md5'), { virtual: true });
+          jest.mock('@joplin/utils/Logger', () => ({
+            __esModule: true,
+            default: { create: () => ({ warn: jest.fn(), info: jest.fn(), error: jest.fn() }) },
+          }), { virtual: true });
+          TS
+
+          cat > b01-oracle/oracle-control.test.ts <<'TS'
+          import { mockRNFS, mockSaf } from './oracle-mocks';
+          import FsDriverRN from './fs-driver-rn';
+
+          test('non-scoped iOS-style /private path remains relative', async () => {
+            jest.clearAllMocks();
+            mockSaf.listFiles.mockReset();
+            mockRNFS.readDir.mockReset();
+            mockRNFS.readDir.mockResolvedValueOnce([{
+              path: '/private/var/mobile/Documents/file.md',
+              isDirectory: () => false,
+              size: 1,
+              mtime: new Date(0),
+              ctime: new Date(0),
+            }]);
+
+            const driver = new FsDriverRN();
+            const result = await driver.readDirStats('/var/mobile/Documents');
+            expect(result).toHaveLength(1);
+            expect(result[0].path).toBe('file.md');
+          });
+          TS
+
+          cat > b01-oracle/oracle-primary.test.ts <<'TS'
+          import { mockRNFS, mockSaf } from './oracle-mocks';
+          import FsDriverRN from './fs-driver-rn';
+
+          test('scoped Android content URI is converted to a relative child path', async () => {
+            jest.clearAllMocks();
+            mockSaf.listFiles.mockReset();
+            mockRNFS.readDir.mockReset();
+            const parent = 'content://provider/tree/root';
+            mockSaf.listFiles.mockResolvedValueOnce([{
+              uri: `${parent}/file.md`,
+              type: 'file',
+              size: 1,
+              lastModified: 1,
+            }]);
+
+            const driver = new FsDriverRN();
+            const result = await driver.readDirStats(parent);
+            expect(result).toHaveLength(1);
+            expect(result[0].path).toBe('file.md');
+          });
+          TS
+
+      - name: Install isolated oracle dependencies
+        working-directory: b01-oracle
+        shell: bash
+        run: npm install --no-audit --no-fund
+
+      - name: Run non-scoped regression control
+        working-directory: b01-oracle
+        shell: bash
+        run: npx jest oracle-control.test.ts --runInBand --forceExit
+
+      - name: Run B01 scoped Android oracle
+        id: oracle
+        working-directory: b01-oracle
+        shell: bash
+        run: |
+          set +e
+          npx jest oracle-primary.test.ts --runInBand --forceExit 2>&1 | tee b01-primary.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+
+          if [[ "${{ matrix.case.expect }}" == "fail" ]]; then
+            if [[ "$rc" -eq 0 ]]; then
+              echo "ERROR: pre-fix snapshot unexpectedly passed the scoped Android oracle"
+              exit 1
+            fi
+            # Guard against treating infrastructure/compile errors as the bug.
+            grep -F "scoped Android content URI is converted to a relative child path" b01-primary.log >/dev/null
+            grep -F "content://provider/tree/root/file.md" b01-primary.log >/dev/null
+            echo "EXPECTED: pre-fix snapshot returns the full scoped URI instead of a relative child path"
+          else
+            if [[ "$rc" -ne 0 ]]; then
+              echo "ERROR: accepted human fix did not pass the scoped Android oracle"
+              exit "$rc"
+            fi
+            echo "EXPECTED: accepted human fix passes the scoped Android oracle"
+          fi
+
+      - name: Write machine-readable smoke evidence
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p evidence
+          cp b01-oracle/b01-primary.log evidence/ 2>/dev/null || true
+          cat > evidence/B01-${{ matrix.case.name }}.json <<JSON
+          {
+            "schema_version": "1.0",
+            "benchmark_id": "B01",
+            "case": "${{ matrix.case.name }}",
+            "source_sha": "${{ matrix.case.sha }}",
+            "expected_oracle": "${{ matrix.case.expect }}",
+            "oracle_exit_code": "${{ steps.oracle.outputs.exit_code }}",
+            "workflow_run_id": "${{ github.run_id }}",
+            "workflow_run_attempt": "${{ github.run_attempt }}"
+          }
+          JSON
+
+      - name: Upload smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: B01-${{ matrix.case.name }}-evidence
+          path: evidence/
