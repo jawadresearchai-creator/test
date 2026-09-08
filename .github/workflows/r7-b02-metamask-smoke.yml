@@ -1,0 +1,166 @@
+name: R7 B02 MetaMask Memoization Historical Smoke
+
+on:
+  push:
+    branches:
+      - r6-benchmark-harness-2026-09-08
+    paths:
+      - '.github/workflows/r7-b02-metamask-smoke.yml'
+  workflow_dispatch:
+
+jobs:
+  b02-oracle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        case:
+          - name: pre_fix
+            sha: 8e156ce8cabc6c89451bd8b91873646bc2740fbd
+            expect: fail
+          - name: human_fix
+            sha: 0439337d1c7456a9c18772daed85b07d0f7ee8d0
+            expect: pass
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout exact historical MetaMask source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --filter=blob:none --no-checkout https://github.com/MetaMask/metamask-mobile.git metamask-mobile
+          cd metamask-mobile
+          git checkout "${{ matrix.case.sha }}"
+          test "$(git rev-parse HEAD)" = "${{ matrix.case.sha }}"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build focused memoization oracle
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p b02-oracle
+          cp metamask-mobile/app/selectors/assets/assets-list.ts b02-oracle/assets-list.ts
+          cp metamask-mobile/app/selectors/util.ts b02-oracle/util.ts
+          cat > b02-oracle/package.json <<'JSON'
+          {
+            "private": true,
+            "type": "module",
+            "dependencies": {
+              "fast-equals": "5.2.2",
+              "reselect": "5.1.1"
+            }
+          }
+          JSON
+          cat > b02-oracle/oracle.mjs <<'JS'
+          import fs from 'node:fs';
+          import assert from 'node:assert/strict';
+          import { deepEqual } from 'fast-equals';
+          import { createSelector, createSelectorCreator, lruMemoize } from 'reselect';
+
+          const source = fs.readFileSync('./assets-list.ts', 'utf8');
+          const util = fs.readFileSync('./util.ts', 'utf8');
+          assert.match(util, /createSelectorCreator\(\s*lruMemoize,\s*deepEqual/);
+
+          const isPre = /export const selectAsset = createDeepEqualSelector\(/.test(source);
+          const isFixed = /export const selectAsset = createSelector\(/.test(source)
+            && /\) => params\.address/.test(source)
+            && /\) => params\.chainId/.test(source)
+            && /\) => params\.isStaked/.test(source);
+          assert.ok(isPre || isFixed, 'historical selectAsset strategy not recognized');
+
+          const createDeepEqualSelector = createSelectorCreator(lruMemoize, deepEqual);
+          let recomputations = 0;
+          const assets = Object.fromEntries(
+            Array.from({ length: 50 }, (_, i) => [`0x${i.toString(16)}`, { address: `0x${i.toString(16)}`, chainId: '0x1', isStaked: false }]),
+          );
+          const state = { assets, staked: [], cache: {} };
+
+          const result = (_assets, _staked, _cache, addressOrParams, chainIdMaybe, isStakedMaybe) => {
+            recomputations += 1;
+            const address = typeof addressOrParams === 'object' ? addressOrParams.address : addressOrParams;
+            const chainId = typeof addressOrParams === 'object' ? addressOrParams.chainId : chainIdMaybe;
+            const isStaked = typeof addressOrParams === 'object' ? addressOrParams.isStaked : isStakedMaybe;
+            return { address, chainId, isStaked: Boolean(isStaked) };
+          };
+
+          const selector = isPre
+            ? createDeepEqualSelector(
+                [
+                  s => s.assets,
+                  s => s.staked,
+                  s => s.cache,
+                  (_s, params) => params,
+                ],
+                result,
+              )
+            : createSelector(
+                [
+                  s => s.assets,
+                  s => s.staked,
+                  s => s.cache,
+                  (_s, params) => params.address,
+                  (_s, params) => params.chainId,
+                  (_s, params) => params.isStaked,
+                ],
+                result,
+              );
+
+          const runPass = () => {
+            for (let i = 0; i < 50; i += 1) {
+              const address = `0x${i.toString(16)}`;
+              const out = selector(state, { address, chainId: '0x1', isStaked: false });
+              assert.deepEqual(out, { address, chainId: '0x1', isStaked: false });
+            }
+          };
+
+          runPass();
+          const afterFirst = recomputations;
+          runPass();
+          const afterSecond = recomputations;
+          const secondPassRecomputations = afterSecond - afterFirst;
+
+          console.log(JSON.stringify({ strategy: isPre ? 'deep-equal-lru-param-object' : 'createSelector-scalar-params', afterFirst, afterSecond, secondPassRecomputations }));
+
+          assert.equal(afterFirst, 50, 'control: first pass should compute each distinct token once');
+          if (isPre) {
+            assert.equal(secondPassRecomputations, 50, 'historical bug signature: one-entry LRU strategy recomputes every token on second pass');
+            process.exitCode = 42;
+          } else {
+            assert.equal(secondPassRecomputations, 0, 'accepted fix should reuse cached scalar-parameter selector results');
+          }
+          JS
+
+      - name: Install oracle dependencies
+        working-directory: b02-oracle
+        run: npm install --no-audit --no-fund
+
+      - name: Run B02 oracle
+        id: oracle
+        working-directory: b02-oracle
+        shell: bash
+        run: |
+          set +e
+          node oracle.mjs 2>&1 | tee b02.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+          if [[ "${{ matrix.case.expect }}" == "fail" ]]; then
+            test "$rc" -eq 42
+            grep -F '"secondPassRecomputations":50' b02.log >/dev/null
+            echo 'EXPECTED: historical selector recomputes all token results on second pass'
+          else
+            test "$rc" -eq 0
+            grep -F '"secondPassRecomputations":0' b02.log >/dev/null
+            echo 'EXPECTED: accepted selector reuses cached scalar-parameter results'
+          fi
+
+      - name: Upload B02 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: B02-${{ matrix.case.name }}-evidence
+          path: b02-oracle/b02.log
