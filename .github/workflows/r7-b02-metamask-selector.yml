@@ -50,11 +50,16 @@ jobs:
           set -euxo pipefail
           python3 - <<'PY'
           from pathlib import Path
+          import json
           import os
 
           source = Path('metamask-mobile/app/selectors/assets/assets-list.ts').read_text()
           util = Path('metamask-mobile/app/selectors/util.ts').read_text()
+          package = json.loads(Path('metamask-mobile/package.json').read_text())
           mode = os.environ['MODE']
+
+          assert package['dependencies']['reselect'] == '^5.1.1', package['dependencies']['reselect']
+          assert package['dependencies']['fast-equals'] == '^5.2.2', package['dependencies']['fast-equals']
 
           required_util = [
               'createSelectorCreator',
@@ -82,8 +87,7 @@ jobs:
         env:
           MODE: ${{ matrix.case.implementation }}
 
-      - name: Resolve historical memoization dependency versions
-        id: versions
+      - name: Resolve direct historical memoization dependency versions
         shell: bash
         run: |
           set -euxo pipefail
@@ -93,16 +97,22 @@ jobs:
 
           text = Path('metamask-mobile/yarn.lock').read_text()
 
-          def version_for(package):
-              # Yarn 3/4 lock entries contain a resolution field such as
-              # resolution: "reselect@npm:5.1.1"
-              m = re.search(rf'resolution:\s+"{re.escape(package)}@npm:([^"\s]+)"', text)
-              if not m:
+          def versions_for(package):
+              values = re.findall(rf'resolution:\s+"{re.escape(package)}@npm:([^"\s]+)"', text)
+              if not values:
                   raise SystemExit(f'Could not resolve {package} from historical yarn.lock')
-              return m.group(1)
+              return sorted(set(values), key=lambda v: tuple(int(x) for x in re.match(r'^(\d+)\.(\d+)\.(\d+)', v).groups()))
 
-          print(f'RESELECT_VERSION={version_for("reselect")}')
-          print(f'FAST_EQUALS_VERSION={version_for("fast-equals")}')
+          # The lock contains transitive Reselect 4.x as well as the app's direct
+          # Reselect 5.x dependency. package.json pins the direct range at ^5.1.1,
+          # so select the highest locked version satisfying that major.
+          reselect = [v for v in versions_for('reselect') if v.startswith('5.')]
+          fast_equals = [v for v in versions_for('fast-equals') if v.startswith('5.')]
+          if not reselect or not fast_equals:
+              raise SystemExit('Direct dependency major not found in historical yarn.lock')
+
+          print(f'RESELECT_VERSION={reselect[-1]}')
+          print(f'FAST_EQUALS_VERSION={fast_equals[-1]}')
           PY
           cat /tmp/versions.env
           cat /tmp/versions.env >> "$GITHUB_ENV"
@@ -138,49 +148,6 @@ jobs:
           const selectStakedAssets = (state) => state.stakedAssets;
           const selectCache = (state) => state.cache;
 
-          const resultFn = (assets, _staked, _cache, addressOrParams, maybeChainId, maybeIsStaked) => {
-            let address;
-            let chainId;
-            let isStaked;
-            if (mode === 'deep_equal_lru') {
-              ({ address, chainId, isStaked } = addressOrParams);
-            } else {
-              address = addressOrParams;
-              chainId = maybeChainId;
-              isStaked = maybeIsStaked;
-            }
-            return assets[chainId]?.find(
-              (item) => item.assetId === address && Boolean(item.isStaked) === Boolean(isStaked),
-            );
-          };
-
-          let selector;
-          if (mode === 'deep_equal_lru') {
-            selector = createDeepEqualSelector(
-              [
-                selectAssets,
-                selectStakedAssets,
-                selectCache,
-                (_state, params) => params,
-              ],
-              resultFn,
-            );
-          } else if (mode === 'primitive_weakmap') {
-            selector = createSelector(
-              [
-                selectAssets,
-                selectStakedAssets,
-                selectCache,
-                (_state, params) => params.address,
-                (_state, params) => params.chainId,
-                (_state, params) => params.isStaked,
-              ],
-              resultFn,
-            );
-          } else {
-            throw new Error(`Unknown mode ${mode}`);
-          }
-
           const state = {
             assets: {
               '0x1': [
@@ -192,32 +159,79 @@ jobs:
             cache: {},
           };
 
-          const call = (address) => selector(state, { address, chainId: '0x1', isStaked: false });
+          function makeSelector() {
+            const resultFn = (assets, _staked, _cache, addressOrParams, maybeChainId, maybeIsStaked) => {
+              let address;
+              let chainId;
+              let isStaked;
+              if (mode === 'deep_equal_lru') {
+                ({ address, chainId, isStaked } = addressOrParams);
+              } else {
+                address = addressOrParams;
+                chainId = maybeChainId;
+                isStaked = maybeIsStaked;
+              }
+              return assets[chainId]?.find(
+                (item) => item.assetId === address && Boolean(item.isStaked) === Boolean(isStaked),
+              );
+            };
 
-          // Independent control: semantically identical parameter values supplied
-          // as fresh objects must remain memoized in both historical implementations.
+            if (mode === 'deep_equal_lru') {
+              return createDeepEqualSelector(
+                [
+                  selectAssets,
+                  selectStakedAssets,
+                  selectCache,
+                  (_state, params) => params,
+                ],
+                resultFn,
+              );
+            }
+            if (mode === 'primitive_weakmap') {
+              return createSelector(
+                [
+                  selectAssets,
+                  selectStakedAssets,
+                  selectCache,
+                  (_state, params) => params.address,
+                  (_state, params) => params.chainId,
+                  (_state, params) => params.isStaked,
+                ],
+                resultFn,
+              );
+            }
+            throw new Error(`Unknown mode ${mode}`);
+          }
+
+          const invoke = (selector, address) =>
+            selector(state, { address, chainId: '0x1', isStaked: false });
+
+          // Independent control: repeated equivalent values supplied through fresh
+          // parameter objects should execute the result function only once.
+          const controlSelector = makeSelector();
           for (let i = 0; i < 6; i += 1) {
-            const out = call('A');
+            const out = invoke(controlSelector, 'A');
             if (!out || out.name !== 'Asset A') throw new Error('control functional result mismatch');
           }
-          const controlRecomputations = selector.recomputations();
+          const controlRecomputations = controlSelector.recomputations();
           if (controlRecomputations !== 1) {
             throw new Error(`control recomputations expected 1, got ${controlRecomputations}`);
           }
 
-          selector.resetRecomputations();
-          // Force result-function cache pressure across two token-list items.
-          // The historical LRU/deep-equal selector has a one-entry result cache,
-          // while the accepted createSelector implementation caches primitive
-          // argument combinations through Reselect's WeakMap memoizer.
+          // Primary oracle: a token list alternates parameter sets against one
+          // shared selector. The pre-fix deep-equal LRU result cache has one entry
+          // and thrashes. Reselect 5 createSelector uses WeakMap memoization for
+          // the split primitive inputs, retaining both parameter combinations.
+          const alternatingSelector = makeSelector();
           const sequence = ['A', 'B', 'A', 'B', 'A', 'B'];
           for (const address of sequence) {
-            const out = call(address);
+            const out = invoke(alternatingSelector, address);
             if (!out || out.assetId !== address) throw new Error(`alternating functional mismatch for ${address}`);
           }
-          const alternatingRecomputations = selector.recomputations();
+          const alternatingRecomputations = alternatingSelector.recomputations();
 
           console.log(JSON.stringify({
+            reselectVersion: require('reselect/package.json').version,
             mode,
             controlRecomputations,
             alternatingRecomputations,
@@ -231,7 +245,7 @@ jobs:
           }
           JS
 
-      - name: Install exact historical memoization dependencies
+      - name: Install exact direct historical memoization dependencies
         working-directory: b02-oracle
         shell: bash
         run: npm install --no-audit --no-fund
@@ -255,11 +269,13 @@ jobs:
           cp b02-oracle/b02-oracle.log evidence/ 2>/dev/null || true
           cat > evidence/B02-${{ matrix.case.name }}.json <<JSON
           {
-            "schema_version": "1.0",
+            "schema_version": "1.1",
             "benchmark_id": "B02",
             "case": "${{ matrix.case.name }}",
             "source_sha": "${{ matrix.case.sha }}",
             "implementation": "${{ matrix.case.implementation }}",
+            "reselect_version": "${RESELECT_VERSION}",
+            "fast_equals_version": "${FAST_EQUALS_VERSION}",
             "expected_alternating_recomputations": "${{ matrix.case.expected_alternating_recomputations }}",
             "workflow_run_id": "${{ github.run_id }}",
             "workflow_run_attempt": "${{ github.run_attempt }}"
