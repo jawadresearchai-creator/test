@@ -71,8 +71,6 @@ jobs:
           };
           JS
 
-          # Local imports are irrelevant to readDirStats but must resolve when the
-          # exact historical source module is loaded.
           cat > b01-oracle/tarCreate.ts <<'TS'
           export default async function tarCreate() { throw new Error('not used by B01 oracle'); }
           TS
@@ -86,7 +84,11 @@ jobs:
 
           jest.mock('@joplin/lib/fs-driver-base', () => ({
             __esModule: true,
-            default: class FsDriverBase {},
+            default: class FsDriverBase {
+              protected async readDirStatsHandleRecursion_(_basePath: string, _stat: unknown, output: unknown[]) {
+                return output;
+              }
+            },
           }), { virtual: true });
           jest.mock('rn-fetch-blob', () => ({ __esModule: true, default: { fs: {} } }), { virtual: true });
           jest.mock('@dr.pogodin/react-native-fs', () => mockRNFS, { virtual: true });
@@ -176,7 +178,6 @@ jobs:
               echo "ERROR: pre-fix snapshot unexpectedly passed the scoped Android oracle"
               exit 1
             fi
-            # Guard against treating infrastructure/compile errors as the bug.
             grep -F "scoped Android content URI is converted to a relative child path" b01-primary.log >/dev/null
             grep -F "content://provider/tree/root/file.md" b01-primary.log >/dev/null
             echo "EXPECTED: pre-fix snapshot returns the full scoped URI instead of a relative child path"
