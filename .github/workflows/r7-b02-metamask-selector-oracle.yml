@@ -1,0 +1,212 @@
+name: R7 B02 MetaMask Selector Memoization Oracle
+
+on:
+  push:
+    branches:
+      - r6-benchmark-harness-2026-09-08
+    paths:
+      - '.github/workflows/r7-b02-metamask-selector-oracle.yml'
+      - 'benchmarks/r7-b02-trigger.txt'
+  workflow_dispatch:
+
+jobs:
+  b02-oracle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        case:
+          - name: pre_fix
+            sha: 8e156ce8cabc6c89451bd8b91873646bc2740fbd
+            expect_primary: fail
+          - name: human_fix
+            sha: 0439337d1c7456a9c18772daed85b07d0f7ee8d0
+            expect_primary: pass
+
+    steps:
+      - name: Checkout benchmark harness
+        uses: actions/checkout@v4
+
+      - name: Checkout exact historical MetaMask source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --filter=blob:none --no-checkout https://github.com/MetaMask/metamask-mobile.git metamask-mobile
+          cd metamask-mobile
+          git checkout "${{ matrix.case.sha }}"
+          test "$(git rev-parse HEAD)" = "${{ matrix.case.sha }}"
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build isolated exact-source selector oracle
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p b02-oracle
+
+          python3 - <<'PY'
+          from pathlib import Path
+          src = Path('metamask-mobile/app/selectors/assets/assets-list.ts').read_text()
+          start = src.index('export const selectAsset =')
+          end = src.index('\nconst oneHundredThousandths', start)
+          block = src[start:end]
+          Path('b02-oracle/selectAsset.block.ts').write_text(block)
+          PY
+
+          cat > b02-oracle/package.json <<'JSON'
+          {
+            "private": true,
+            "type": "module",
+            "dependencies": {
+              "fast-equals": "5.2.2",
+              "reselect": "5.1.1",
+              "tsx": "4.20.5",
+              "typescript": "5.8.3"
+            }
+          }
+          JSON
+
+          cat > b02-oracle/header.ts <<'TS'
+          import { deepEqual } from 'fast-equals';
+          import { createSelector, createSelectorCreator, lruMemoize } from 'reselect';
+
+          type RootState = any;
+          type Asset = any;
+
+          const createDeepEqualSelector = createSelectorCreator(lruMemoize, deepEqual);
+          const selectAssetsBySelectedAccountGroup = (state: RootState) => state.assets;
+          const selectStakedAssets = (state: RootState) => state.stakedAssets;
+          const assetToToken = (asset: Asset, _tokensChainsCache: unknown) => asset;
+          TS
+
+          cat > b02-oracle/footer.ts <<'TS'
+
+          const state: RootState = {
+            assets: {
+              '0x1': [{
+                assetId: '0xaaa', chainId: '0x1', balance: '1', decimals: 18,
+                image: '', name: 'Asset A', symbol: 'AAA', type: 'eip155:1/slip44:60', isNative: false,
+              }],
+              '0x2': [{
+                assetId: '0xbbb', chainId: '0x2', balance: '2', decimals: 18,
+                image: '', name: 'Asset B', symbol: 'BBB', type: 'eip155:2/slip44:60', isNative: false,
+              }],
+            },
+            stakedAssets: [],
+            engine: {
+              backgroundState: {
+                TokenListController: { tokensChainsCache: {} },
+              },
+            },
+          };
+
+          const A1 = { address: '0xaaa', chainId: '0x1', isStaked: false };
+          const A2 = { address: '0xaaa', chainId: '0x1', isStaked: false };
+          const B1 = { address: '0xbbb', chainId: '0x2', isStaked: false };
+
+          const mode = process.argv[2];
+          if (!mode) throw new Error('mode required');
+
+          if (mode === 'control') {
+            const first = selectAsset(state, A1);
+            const second = selectAsset(state, A2);
+            const recomputations = selectAsset.recomputations();
+            console.log(`CONTROL first=${first?.assetId} second=${second?.assetId} recomputations=${recomputations}`);
+            if (first?.assetId !== '0xaaa' || second?.assetId !== '0xaaa') {
+              throw new Error('control semantic result changed');
+            }
+            if (recomputations !== 1) {
+              throw new Error(`control expected one recomputation for equivalent consecutive params but got ${recomputations}`);
+            }
+          } else if (mode === 'primary') {
+            const firstA = selectAsset(state, A1);
+            const middleB = selectAsset(state, B1);
+            const secondA = selectAsset(state, A2);
+            const recomputations = selectAsset.recomputations();
+            console.log(`PRIMARY A1=${firstA?.assetId} B=${middleB?.assetId} A2=${secondA?.assetId} recomputations=${recomputations}`);
+            if (firstA?.assetId !== '0xaaa' || middleB?.assetId !== '0xbbb' || secondA?.assetId !== '0xaaa') {
+              throw new Error('primary semantic result changed');
+            }
+            if (recomputations > 2) {
+              throw new Error(`primary expected at most 2 recomputations for A->B->equivalent-A but got ${recomputations}`);
+            }
+          } else {
+            throw new Error(`unknown mode ${mode}`);
+          }
+          TS
+
+          cat b02-oracle/header.ts b02-oracle/selectAsset.block.ts b02-oracle/footer.ts > b02-oracle/oracle.ts
+
+          echo '--- exact historical selectAsset block ---'
+          cat b02-oracle/selectAsset.block.ts
+
+      - name: Install isolated oracle dependencies
+        working-directory: b02-oracle
+        shell: bash
+        run: npm install --no-audit --no-fund
+
+      - name: Run independent control oracle
+        working-directory: b02-oracle
+        shell: bash
+        run: npx tsx oracle.ts control 2>&1 | tee control.log
+
+      - name: Run B02 primary oracle
+        id: primary
+        working-directory: b02-oracle
+        shell: bash
+        run: |
+          set +e
+          npx tsx oracle.ts primary 2>&1 | tee primary.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+
+          if [[ "${{ matrix.case.expect_primary }}" == "fail" ]]; then
+            if [[ "$rc" -eq 0 ]]; then
+              echo 'ERROR: pre-fix selector unexpectedly preserved A-result memoization across A->B->A'
+              exit 1
+            fi
+            grep -F 'primary expected at most 2 recomputations' primary.log >/dev/null
+            grep -F 'got 3' primary.log >/dev/null
+            echo 'EXPECTED: pre-fix LRU/deep-equal result cache recomputes equivalent A after B'
+          else
+            if [[ "$rc" -ne 0 ]]; then
+              echo 'ERROR: accepted human fix failed the B02 memoization oracle'
+              exit "$rc"
+            fi
+            grep -F 'recomputations=2' primary.log >/dev/null
+            echo 'EXPECTED: accepted createSelector repair reuses cached A result across A->B->A'
+          fi
+
+      - name: Write machine-readable evidence
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p evidence
+          cp b02-oracle/control.log evidence/ 2>/dev/null || true
+          cp b02-oracle/primary.log evidence/ 2>/dev/null || true
+          cat > evidence/B02-${{ matrix.case.name }}.json <<JSON
+          {
+            "schema_version": "1.0",
+            "benchmark_id": "B02",
+            "case": "${{ matrix.case.name }}",
+            "source_sha": "${{ matrix.case.sha }}",
+            "expected_primary": "${{ matrix.case.expect_primary }}",
+            "primary_exit_code": "${{ steps.primary.outputs.exit_code }}",
+            "oracle": "selectAsset memoization A->B->equivalent-A",
+            "control": "equivalent consecutive A params remain memoized",
+            "workflow_run_id": "${{ github.run_id }}",
+            "workflow_run_attempt": "${{ github.run_attempt }}"
+          }
+          JSON
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: B02-${{ matrix.case.name }}-evidence
+          path: evidence/
