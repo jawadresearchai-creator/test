@@ -1,0 +1,274 @@
+name: R7 B02 MetaMask Selector Memoization
+
+on:
+  push:
+    branches:
+      - r6-benchmark-harness-2026-09-08
+    paths:
+      - '.github/workflows/r7-b02-metamask-selector.yml'
+      - 'benchmarks/r7-b02-trigger.txt'
+  workflow_dispatch:
+
+jobs:
+  b02-oracle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        case:
+          - name: pre_fix
+            sha: 8e156ce8cabc6c89451bd8b91873646bc2740fbd
+            implementation: deep_equal_lru
+            expected_alternating_recomputations: 6
+          - name: human_fix
+            sha: 0439337d1c7456a9c18772daed85b07d0f7ee8d0
+            implementation: primitive_weakmap
+            expected_alternating_recomputations: 2
+
+    steps:
+      - name: Checkout benchmark harness
+        uses: actions/checkout@v4
+
+      - name: Checkout exact historical MetaMask source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --filter=blob:none --no-checkout https://github.com/MetaMask/metamask-mobile.git metamask-mobile
+          cd metamask-mobile
+          git checkout "${{ matrix.case.sha }}"
+          test "$(git rev-parse HEAD)" = "${{ matrix.case.sha }}"
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Verify exact historical source shape
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+
+          source = Path('metamask-mobile/app/selectors/assets/assets-list.ts').read_text()
+          util = Path('metamask-mobile/app/selectors/util.ts').read_text()
+          mode = os.environ['MODE']
+
+          required_util = [
+              'createSelectorCreator',
+              'lruMemoize',
+              'deepEqual',
+              'createDeepEqualSelector = createSelectorCreator',
+          ]
+          for token in required_util:
+              assert token in util, f'missing historical util anchor: {token}'
+
+          if mode == 'deep_equal_lru':
+              assert 'export const selectAsset = createDeepEqualSelector(' in source
+              assert ') => params,' in source
+              assert ') => params.address,' not in source
+              print('SOURCE_GUARD: pre-fix selectAsset uses createDeepEqualSelector with whole params object')
+          elif mode == 'primitive_weakmap':
+              assert "import { createSelector } from 'reselect';" in source
+              assert 'export const selectAsset = createSelector(' in source
+              for token in [') => params.address,', ') => params.chainId,', ') => params.isStaked,']:
+                  assert token in source, f'missing fixed primitive input: {token}'
+              print('SOURCE_GUARD: accepted fix uses createSelector with split primitive params')
+          else:
+              raise AssertionError(f'unknown mode: {mode}')
+          PY
+        env:
+          MODE: ${{ matrix.case.implementation }}
+
+      - name: Resolve historical memoization dependency versions
+        id: versions
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY' > /tmp/versions.env
+          from pathlib import Path
+          import re
+
+          text = Path('metamask-mobile/yarn.lock').read_text()
+
+          def version_for(package):
+              # Yarn 3/4 lock entries contain a resolution field such as
+              # resolution: "reselect@npm:5.1.1"
+              m = re.search(rf'resolution:\s+"{re.escape(package)}@npm:([^"\s]+)"', text)
+              if not m:
+                  raise SystemExit(f'Could not resolve {package} from historical yarn.lock')
+              return m.group(1)
+
+          print(f'RESELECT_VERSION={version_for("reselect")}')
+          print(f'FAST_EQUALS_VERSION={version_for("fast-equals")}')
+          PY
+          cat /tmp/versions.env
+          cat /tmp/versions.env >> "$GITHUB_ENV"
+
+      - name: Build semantic memoization oracle
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p b02-oracle
+          cat > b02-oracle/package.json <<JSON
+          {
+            "private": true,
+            "dependencies": {
+              "reselect": "${RESELECT_VERSION}",
+              "fast-equals": "${FAST_EQUALS_VERSION}"
+            }
+          }
+          JSON
+
+          cat > b02-oracle/oracle.cjs <<'JS'
+          const {
+            createSelector,
+            createSelectorCreator,
+            lruMemoize,
+          } = require('reselect');
+          const { deepEqual } = require('fast-equals');
+
+          const mode = process.env.MODE;
+          const expectedAlternating = Number(process.env.EXPECTED_ALTERNATING);
+          const createDeepEqualSelector = createSelectorCreator(lruMemoize, deepEqual);
+
+          const selectAssets = (state) => state.assets;
+          const selectStakedAssets = (state) => state.stakedAssets;
+          const selectCache = (state) => state.cache;
+
+          const resultFn = (assets, _staked, _cache, addressOrParams, maybeChainId, maybeIsStaked) => {
+            let address;
+            let chainId;
+            let isStaked;
+            if (mode === 'deep_equal_lru') {
+              ({ address, chainId, isStaked } = addressOrParams);
+            } else {
+              address = addressOrParams;
+              chainId = maybeChainId;
+              isStaked = maybeIsStaked;
+            }
+            return assets[chainId]?.find(
+              (item) => item.assetId === address && Boolean(item.isStaked) === Boolean(isStaked),
+            );
+          };
+
+          let selector;
+          if (mode === 'deep_equal_lru') {
+            selector = createDeepEqualSelector(
+              [
+                selectAssets,
+                selectStakedAssets,
+                selectCache,
+                (_state, params) => params,
+              ],
+              resultFn,
+            );
+          } else if (mode === 'primitive_weakmap') {
+            selector = createSelector(
+              [
+                selectAssets,
+                selectStakedAssets,
+                selectCache,
+                (_state, params) => params.address,
+                (_state, params) => params.chainId,
+                (_state, params) => params.isStaked,
+              ],
+              resultFn,
+            );
+          } else {
+            throw new Error(`Unknown mode ${mode}`);
+          }
+
+          const state = {
+            assets: {
+              '0x1': [
+                { assetId: 'A', chainId: '0x1', isStaked: false, name: 'Asset A' },
+                { assetId: 'B', chainId: '0x1', isStaked: false, name: 'Asset B' },
+              ],
+            },
+            stakedAssets: [],
+            cache: {},
+          };
+
+          const call = (address) => selector(state, { address, chainId: '0x1', isStaked: false });
+
+          // Independent control: semantically identical parameter values supplied
+          // as fresh objects must remain memoized in both historical implementations.
+          for (let i = 0; i < 6; i += 1) {
+            const out = call('A');
+            if (!out || out.name !== 'Asset A') throw new Error('control functional result mismatch');
+          }
+          const controlRecomputations = selector.recomputations();
+          if (controlRecomputations !== 1) {
+            throw new Error(`control recomputations expected 1, got ${controlRecomputations}`);
+          }
+
+          selector.resetRecomputations();
+          // Force result-function cache pressure across two token-list items.
+          // The historical LRU/deep-equal selector has a one-entry result cache,
+          // while the accepted createSelector implementation caches primitive
+          // argument combinations through Reselect's WeakMap memoizer.
+          const sequence = ['A', 'B', 'A', 'B', 'A', 'B'];
+          for (const address of sequence) {
+            const out = call(address);
+            if (!out || out.assetId !== address) throw new Error(`alternating functional mismatch for ${address}`);
+          }
+          const alternatingRecomputations = selector.recomputations();
+
+          console.log(JSON.stringify({
+            mode,
+            controlRecomputations,
+            alternatingRecomputations,
+            expectedAlternating,
+          }, null, 2));
+
+          if (alternatingRecomputations !== expectedAlternating) {
+            throw new Error(
+              `alternating recomputations expected ${expectedAlternating}, got ${alternatingRecomputations}`,
+            );
+          }
+          JS
+
+      - name: Install exact historical memoization dependencies
+        working-directory: b02-oracle
+        shell: bash
+        run: npm install --no-audit --no-fund
+
+      - name: Run B02 semantic oracle
+        id: oracle
+        working-directory: b02-oracle
+        shell: bash
+        env:
+          MODE: ${{ matrix.case.implementation }}
+          EXPECTED_ALTERNATING: ${{ matrix.case.expected_alternating_recomputations }}
+        run: |
+          set -o pipefail
+          node oracle.cjs 2>&1 | tee b02-oracle.log
+
+      - name: Write machine-readable evidence
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p evidence
+          cp b02-oracle/b02-oracle.log evidence/ 2>/dev/null || true
+          cat > evidence/B02-${{ matrix.case.name }}.json <<JSON
+          {
+            "schema_version": "1.0",
+            "benchmark_id": "B02",
+            "case": "${{ matrix.case.name }}",
+            "source_sha": "${{ matrix.case.sha }}",
+            "implementation": "${{ matrix.case.implementation }}",
+            "expected_alternating_recomputations": "${{ matrix.case.expected_alternating_recomputations }}",
+            "workflow_run_id": "${{ github.run_id }}",
+            "workflow_run_attempt": "${{ github.run_attempt }}"
+          }
+          JSON
+
+      - name: Upload B02 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: B02-${{ matrix.case.name }}-evidence
+          path: evidence/
