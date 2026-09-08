@@ -12,7 +12,7 @@ on:
 jobs:
   b06-oracle:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -27,65 +27,174 @@ jobs:
       - name: Checkout benchmark harness
         uses: actions/checkout@v4
 
-      - name: Checkout historical MetaMask Mobile
+      - name: Checkout exact historical MetaMask source
         shell: bash
         run: |
           set -euxo pipefail
           git clone --filter=blob:none --no-checkout https://github.com/MetaMask/metamask-mobile.git metamask-mobile
           cd metamask-mobile
           git checkout "${{ matrix.case.sha }}"
-          git rev-parse HEAD
+          test "$(git rev-parse HEAD)" = "${{ matrix.case.sha }}"
 
-      - name: Set up Node 20.18.0
+      - name: Set up Node 20
         uses: actions/setup-node@v4
         with:
-          node-version: 20.18.0
-          cache: yarn
-          cache-dependency-path: metamask-mobile/yarn.lock
+          node-version: 20
 
-      - name: Enable Corepack
-        shell: bash
-        run: corepack enable
-
-      - name: Install dependencies
-        working-directory: metamask-mobile
-        shell: bash
-        run: yarn install --immutable
-
-      - name: Inject accepted regression test into pre-fix snapshot
-        if: matrix.case.name == 'pre_fix'
-        working-directory: metamask-mobile
+      - name: Build isolated exact-source oracle
         shell: bash
         run: |
           set -euxo pipefail
-          git fetch --depth=1 origin 84ca8bd1aa90363d4a3a90c5ae400bebfa225156
-          git show 84ca8bd1aa90363d4a3a90c5ae400bebfa225156:app/components/Views/confirmations/components/confirmation-asset-polling-provider/confirmation-asset-polling-provider.test.tsx \
-            > app/components/Views/confirmations/components/confirmation-asset-polling-provider/confirmation-asset-polling-provider.test.tsx
+          target='app/components/Views/confirmations/components/confirmation-asset-polling-provider'
+          mkdir -p "b06-oracle/$target"
+          cp "metamask-mobile/$target/confirmation-asset-polling-provider.tsx" "b06-oracle/$target/"
 
-      - name: Run B06 regression oracle
+          mkdir -p b06-oracle/app/components/hooks/AssetPolling
+          mkdir -p b06-oracle/app/components/Views/confirmations/hooks/transactions
+          mkdir -p b06-oracle/app/core/redux/slices
+
+          cat > b06-oracle/package.json <<'JSON'
+          {
+            "private": true,
+            "devDependencies": {
+              "@types/jest": "29.5.14",
+              "@types/react": "18.3.24",
+              "@types/react-test-renderer": "18.3.1",
+              "jest": "29.7.0",
+              "react": "18.3.1",
+              "react-test-renderer": "18.3.1",
+              "ts-jest": "29.4.1",
+              "typescript": "5.8.3"
+            }
+          }
+          JSON
+
+          cat > b06-oracle/tsconfig.json <<'JSON'
+          {
+            "compilerOptions": {
+              "target": "ES2020",
+              "module": "commonjs",
+              "jsx": "react-jsx",
+              "esModuleInterop": true,
+              "isolatedModules": true,
+              "skipLibCheck": true
+            }
+          }
+          JSON
+
+          cat > b06-oracle/jest.config.cjs <<'JS'
+          module.exports = {
+            testEnvironment: 'node',
+            transform: { '^.+\\.tsx?$': ['ts-jest', { diagnostics: false }] },
+            moduleNameMapper: {
+              '^@metamask/utils$': '<rootDir>/metamask-utils.ts',
+            },
+            moduleFileExtensions: ['ts', 'tsx', 'js'],
+          };
+          JS
+
+          cat > b06-oracle/metamask-utils.ts <<'TS'
+          export type Hex = `0x${string}`;
+          TS
+
+          cat > b06-oracle/app/components/hooks/AssetPolling/AssetPollingProvider.tsx <<'TS'
+          import React from 'react';
+          export const AssetPollingProvider = (props: unknown) => {
+            (globalThis as any).__assetPollingProps = props;
+            return null;
+          };
+          TS
+
+          cat > b06-oracle/app/components/Views/confirmations/hooks/transactions/useTransactionMetadataRequest.ts <<'TS'
+          export const useTransactionMetadataRequest = () => (globalThis as any).__transactionMeta;
+          TS
+
+          cat > b06-oracle/app/core/redux/slices/bridge.ts <<'TS'
+          export const selectEnabledSourceChains = (state: any) => state.bridgeChains;
+          TS
+
+          cat > b06-oracle/oracle.test.tsx <<'TS'
+          import React from 'react';
+          import TestRenderer, { act } from 'react-test-renderer';
+
+          jest.mock('react-redux', () => ({
+            useSelector: (selector: any) => selector({ bridgeChains: (globalThis as any).__bridgeChains }),
+          }), { virtual: true });
+
+          import { ConfirmationAssetPollingProvider } from './app/components/Views/confirmations/components/confirmation-asset-polling-provider/confirmation-asset-polling-provider';
+
+          const FROM = '0x935e73edb9ff52e23bac7f7e043a1ecd06d05477';
+
+          const render = (transactionChainId: string) => {
+            (globalThis as any).__bridgeChains = [
+              { chainId: '0x1', isEvm: true },
+              { chainId: '0x2', isEvm: true },
+              { chainId: 'SolanaChainId', isEvm: false },
+            ];
+            (globalThis as any).__transactionMeta = {
+              chainId: transactionChainId,
+              txParams: { from: FROM },
+            };
+            (globalThis as any).__assetPollingProps = undefined;
+
+            act(() => {
+              TestRenderer.create(
+                <ConfirmationAssetPollingProvider>
+                  <></>
+                </ConfirmationAssetPollingProvider>,
+              );
+            });
+            return (globalThis as any).__assetPollingProps;
+          };
+
+          test('control: EVM bridge chains are filtered and not duplicated', () => {
+            const props = render('0x1');
+            expect(props.chainIds).toEqual(['0x1', '0x2']);
+            expect(props.address).toBe(FROM);
+          });
+
+          test('primary: transaction chain is included when absent from bridge chains', () => {
+            const props = render('0x89');
+            expect(props.chainIds).toEqual(['0x1', '0x2', '0x89']);
+            expect(props.address).toBe(FROM);
+          });
+          TS
+
+      - name: Install isolated oracle dependencies
+        working-directory: b06-oracle
+        shell: bash
+        run: npm install --no-audit --no-fund
+
+      - name: Run control independently
+        working-directory: b06-oracle
+        shell: bash
+        run: npx jest oracle.test.tsx --runInBand --forceExit -t 'control:'
+
+      - name: Run B06 primary oracle
         id: oracle
-        working-directory: metamask-mobile
-        env:
-          NODE_OPTIONS: --max-old-space-size=8192
+        working-directory: b06-oracle
         shell: bash
         run: |
           set +e
-          yarn jest app/components/Views/confirmations/components/confirmation-asset-polling-provider/confirmation-asset-polling-provider.test.tsx --runInBand --forceExit
-          rc=$?
+          npx jest oracle.test.tsx --runInBand --forceExit -t 'primary:' 2>&1 | tee b06-primary.log
+          rc=${PIPESTATUS[0]}
           set -e
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+
           if [[ "${{ matrix.case.expect }}" == "fail" ]]; then
             if [[ "$rc" -eq 0 ]]; then
-              echo "ERROR: pre-fix snapshot unexpectedly passed the accepted regression oracle"
+              echo "ERROR: pre-fix source unexpectedly included the transaction chain"
               exit 1
             fi
-            echo "EXPECTED: pre-fix snapshot fails the accepted regression oracle"
+            grep -F "primary: transaction chain is included when absent from bridge chains" b06-primary.log >/dev/null
+            grep -F "0x89" b06-primary.log >/dev/null
+            echo "EXPECTED: pre-fix exact source omits the transaction chain"
           else
             if [[ "$rc" -ne 0 ]]; then
-              echo "ERROR: accepted human fix did not pass its regression oracle"
+              echo "ERROR: accepted human fix did not pass the isolated B06 oracle"
               exit "$rc"
             fi
-            echo "EXPECTED: accepted human fix passes the regression oracle"
+            echo "EXPECTED: accepted human fix includes the transaction chain"
           fi
 
       - name: Write machine-readable smoke evidence
@@ -93,6 +202,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p evidence
+          cp b06-oracle/b06-primary.log evidence/ 2>/dev/null || true
           cat > evidence/B06-${{ matrix.case.name }}.json <<JSON
           {
             "schema_version": "1.0",
