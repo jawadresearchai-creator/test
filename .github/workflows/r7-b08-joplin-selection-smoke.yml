@@ -56,6 +56,14 @@ jobs:
           yarn --version
           yarn workspaces focus @joplin/editor
 
+      - name: Generate editor JavaScript artifacts required by Jest bootstrap
+        working-directory: joplin
+        shell: bash
+        run: |
+          set -euxo pipefail
+          yarn workspace @joplin/editor tsc
+          test -f packages/editor/polyfills.js
+
       - name: Run maintainer post-fix selection regression test
         id: oracle
         working-directory: joplin
