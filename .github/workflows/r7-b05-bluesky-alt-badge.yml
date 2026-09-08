@@ -1,0 +1,175 @@
+name: R7 B05 Bluesky Quoted ALT Badge
+
+on:
+  push:
+    branches:
+      - r6-benchmark-harness-2026-09-08
+    paths:
+      - '.github/workflows/r7-b05-bluesky-alt-badge.yml'
+      - 'benchmarks/r7-b05-trigger.txt'
+  workflow_dispatch:
+
+jobs:
+  b05-oracle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        case:
+          - name: pre_fix
+            sha: dd452a433638789618e875b96d511c9aeadb99ac
+            expected_quote_badge: hidden
+          - name: human_fix
+            sha: 495d1fe9a7a7d9b447eb7bb64e88b915bf0bb1f6
+            expected_quote_badge: visible
+
+    steps:
+      - name: Checkout benchmark harness
+        uses: actions/checkout@v4
+
+      - name: Checkout exact historical Bluesky source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --filter=blob:none --no-checkout https://github.com/bluesky-social/social-app.git bluesky
+          git -C bluesky checkout "${{ matrix.case.sha }}"
+          test "$(git -C bluesky rev-parse HEAD)" = "${{ matrix.case.sha }}"
+
+      - name: Build exact-source semantic oracle
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p b05-oracle
+          cp bluesky/src/components/Post/Embed/ImageEmbed.tsx b05-oracle/ImageEmbed.tsx
+          cp bluesky/src/components/images/AutoSizedImage.tsx b05-oracle/AutoSizedImage.tsx
+          cp bluesky/src/components/images/Gallery/index.tsx b05-oracle/Gallery.tsx
+
+          cat > b05-oracle/oracle.cjs <<'JS'
+          const fs = require('fs');
+
+          const imageEmbed = fs.readFileSync('ImageEmbed.tsx', 'utf8');
+          const autoSized = fs.readFileSync('AutoSizedImage.tsx', 'utf8');
+          const gallery = fs.readFileSync('Gallery.tsx', 'utf8');
+
+          const singlePassesQuoteHide = /hideBadge=\{rest\.isWithinQuote\}/.test(imageEmbed);
+          const singlePredicateUsesHide = /\(hasAlt\s*\|\|\s*isCropped\)\s*&&\s*!hideBadge/.test(autoSized);
+          const singlePredicateAlwaysShows = /\{hasAlt\s*\|\|\s*isCropped\s*\?\s*\(/.test(autoSized);
+
+          const galleryDefinesQuoteHide = /const\s+hideBadges\s*=\s*isWithinQuote/.test(gallery);
+          const galleryPassesHide = /hideBadges=\{hideBadges\}/.test(gallery) || /hideBadge=\{isWithinQuote\}/.test(gallery);
+          const galleryPredicateUsesHide = /\(hasAlt\s*\|\|\s*isCropped\)\s*&&\s*!hideBadges/.test(gallery);
+          const galleryPredicateAlwaysShows = /\{hasAlt\s*\|\|\s*isCropped\s*\?\s*\(/.test(gallery);
+
+          function singleBadgeVisible({isWithinQuote, hasAlt, isCropped}) {
+            const hideBadge = singlePassesQuoteHide ? isWithinQuote : false;
+            if (singlePredicateUsesHide) return (hasAlt || isCropped) && !hideBadge;
+            if (singlePredicateAlwaysShows) return hasAlt || isCropped;
+            throw new Error('SETUP_FAILURE: could not derive AutoSizedImage badge predicate');
+          }
+
+          function galleryBadgeVisible({isWithinQuote, hasAlt, isCropped}) {
+            const hideBadges = (galleryDefinesQuoteHide || galleryPassesHide) ? isWithinQuote : false;
+            if (galleryPredicateUsesHide) return (hasAlt || isCropped) && !hideBadges;
+            if (galleryPredicateAlwaysShows) return hasAlt || isCropped;
+            throw new Error('SETUP_FAILURE: could not derive Gallery badge predicate');
+          }
+
+          const controlSingle = singleBadgeVisible({isWithinQuote: false, hasAlt: true, isCropped: false});
+          const controlGallery = galleryBadgeVisible({isWithinQuote: false, hasAlt: true, isCropped: false});
+          if (!controlSingle || !controlGallery) {
+            throw new Error('CONTROL_FAILURE: normal feed ALT badge must remain visible');
+          }
+          console.log('CONTROL_PASS: ordinary image ALT badges are visible');
+
+          const quoteSingle = singleBadgeVisible({isWithinQuote: true, hasAlt: true, isCropped: false});
+          const quoteGallery = galleryBadgeVisible({isWithinQuote: true, hasAlt: true, isCropped: false});
+
+          console.log(JSON.stringify({
+            sourceShape: {
+              singlePassesQuoteHide,
+              singlePredicateUsesHide,
+              singlePredicateAlwaysShows,
+              galleryDefinesQuoteHide,
+              galleryPassesHide,
+              galleryPredicateUsesHide,
+              galleryPredicateAlwaysShows,
+            },
+            behavior: {
+              controlSingle,
+              controlGallery,
+              quoteSingle,
+              quoteGallery,
+            },
+          }, null, 2));
+
+          if (!quoteSingle || !quoteGallery) {
+            throw new Error(`PRIMARY_FAILURE: quoted ALT badge hidden: single=${quoteSingle}, gallery=${quoteGallery}`);
+          }
+          console.log('PRIMARY_PASS: quoted single and gallery ALT badges remain visible');
+          JS
+
+      - name: Run B05 control and primary oracle
+        id: oracle
+        working-directory: b05-oracle
+        shell: bash
+        env:
+          EXPECTED_QUOTE_BADGE: ${{ matrix.case.expected_quote_badge }}
+        run: |
+          set +e
+          node oracle.cjs 2>&1 | tee b05-oracle.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+
+          grep -F 'CONTROL_PASS:' b05-oracle.log >/dev/null
+          if [[ "$EXPECTED_QUOTE_BADGE" == 'hidden' ]]; then
+            if [[ "$rc" -eq 0 ]]; then
+              echo 'ERROR: pre-fix source unexpectedly shows quoted ALT badges'
+              exit 1
+            fi
+            grep -F 'PRIMARY_FAILURE: quoted ALT badge hidden' b05-oracle.log >/dev/null
+            echo 'EXPECTED: pre-fix quote context suppresses the ALT badge'
+          else
+            if [[ "$rc" -ne 0 ]]; then
+              echo 'ERROR: accepted fix did not restore quoted ALT badges'
+              exit "$rc"
+            fi
+            grep -F 'PRIMARY_PASS:' b05-oracle.log >/dev/null
+            echo 'EXPECTED: accepted fix decouples quote layout from ALT badge visibility'
+          fi
+
+      - name: Write machine-readable evidence
+        if: always()
+        shell: bash
+        env:
+          CASE_NAME: ${{ matrix.case.name }}
+          SOURCE_SHA: ${{ matrix.case.sha }}
+          EXPECTED_QUOTE_BADGE: ${{ matrix.case.expected_quote_badge }}
+          ORACLE_EXIT_CODE: ${{ steps.oracle.outputs.exit_code }}
+        run: |
+          mkdir -p evidence
+          cp b05-oracle/b05-oracle.log evidence/ 2>/dev/null || true
+          python3 - <<'PY'
+          import json, os
+          data = {
+              'schema_version': '1.0',
+              'benchmark_id': 'B05',
+              'case': os.environ['CASE_NAME'],
+              'source_sha': os.environ['SOURCE_SHA'],
+              'expected_quote_badge': os.environ['EXPECTED_QUOTE_BADGE'],
+              'oracle_exit_code': os.environ.get('ORACLE_EXIT_CODE', ''),
+              'workflow_run_id': os.environ['GITHUB_RUN_ID'],
+              'workflow_run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+              'oracle_kind': 'exact-source semantic accessibility/visual predicate',
+          }
+          with open(f"evidence/B05-{os.environ['CASE_NAME']}.json", 'w') as f:
+              json.dump(data, f, indent=2)
+          PY
+
+      - name: Upload B05 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: B05-${{ matrix.case.name }}-evidence
+          path: evidence/
