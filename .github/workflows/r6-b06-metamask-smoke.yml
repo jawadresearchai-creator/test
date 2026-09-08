@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - r6-benchmark-harness-2026-09-08
+    paths:
+      - '.github/workflows/r6-b06-metamask-smoke.yml'
+      - 'benchmarks/r6-b06-trigger.txt'
   workflow_dispatch:
 
 jobs:
