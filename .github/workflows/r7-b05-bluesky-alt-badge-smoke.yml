@@ -1,0 +1,146 @@
+name: R7 B05 Bluesky ALT Badge Historical Smoke
+
+on:
+  push:
+    branches:
+      - r6-benchmark-harness-2026-09-08
+    paths:
+      - '.github/workflows/r7-b05-bluesky-alt-badge-smoke.yml'
+  workflow_dispatch:
+
+jobs:
+  b05-oracle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        case:
+          - name: pre_fix
+            sha: dd452a433638789618e875b96d511c9aeadb99ac
+            expect: fail
+          - name: human_fix
+            sha: 495d1fe9a7a7d9b447eb7bb64e88b915bf0bb1f6
+            expect: pass
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout exact historical Bluesky source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --filter=blob:none --no-checkout https://github.com/bluesky-social/social-app.git bluesky
+          cd bluesky
+          git checkout "${{ matrix.case.sha }}"
+          test "$(git rev-parse HEAD)" = "${{ matrix.case.sha }}"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build focused ALT-badge semantic oracle
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p b05-oracle
+          cp bluesky/src/components/Post/Embed/ImageEmbed.tsx b05-oracle/ImageEmbed.tsx
+          cp bluesky/src/components/images/AutoSizedImage.tsx b05-oracle/AutoSizedImage.tsx
+          cp bluesky/src/components/images/Gallery/index.tsx b05-oracle/Gallery.tsx
+          cp bluesky/src/components/images/ImageLayoutGridItem.tsx b05-oracle/ImageLayoutGridItem.tsx
+          cat > b05-oracle/oracle.cjs <<'JS'
+          const fs = require('node:fs');
+          const assert = require('node:assert/strict');
+
+          const imageEmbed = fs.readFileSync('./ImageEmbed.tsx', 'utf8');
+          const auto = fs.readFileSync('./AutoSizedImage.tsx', 'utf8');
+          const gallery = fs.readFileSync('./Gallery.tsx', 'utf8');
+          const grid = fs.readFileSync('./ImageLayoutGridItem.tsx', 'utf8');
+
+          const preSingleCoupling = /hideBadge=\{rest\.isWithinQuote\}/.test(imageEmbed)
+            && /hideBadge\??:\s*boolean/.test(auto)
+            && /\(hasAlt \|\| isCropped\) && !hideBadge/.test(auto);
+          const preGalleryCoupling = /const hideBadges = isWithinQuote/.test(gallery)
+            || /hideBadge=\{isWithinQuote\}/.test(gallery)
+            || /&& !hideBadges/.test(gallery);
+          const preGridCoupling = /const hideBadges =/.test(grid)
+            && /isWithinQuote/.test(grid)
+            && /hasAlt && !hideBadges/.test(grid);
+
+          const fixedSingle = !/hideBadge=\{rest\.isWithinQuote\}/.test(imageEmbed)
+            && !/hideBadge\??:\s*boolean/.test(auto)
+            && /\{hasAlt \|\| isCropped \? \(/.test(auto);
+          const fixedGallery = !/const hideBadges = isWithinQuote/.test(gallery)
+            && !/hideBadge=\{isWithinQuote\}/.test(gallery)
+            && !/&& !hideBadges/.test(gallery);
+          const fixedGrid = !/const hideBadges =/.test(grid)
+            && /\{hasAlt \? \(/.test(grid);
+
+          const isPre = preSingleCoupling && preGalleryCoupling && preGridCoupling;
+          const isFixed = fixedSingle && fixedGallery && fixedGrid;
+          assert.notEqual(isPre, isFixed, 'expected exactly one historical badge strategy');
+
+          // Model only the invariant represented by the detected source strategy.
+          const shouldShowSingleBadge = ({hasAlt, isCropped, isWithinQuote}) =>
+            isPre ? (hasAlt || isCropped) && !isWithinQuote : (hasAlt || isCropped);
+          const shouldShowGridAlt = ({hasAlt, isWithinQuote}) =>
+            isPre ? hasAlt && !isWithinQuote : hasAlt;
+
+          const cases = {
+            quotedAltSingle: shouldShowSingleBadge({hasAlt: true, isCropped: false, isWithinQuote: true}),
+            quotedCropSingle: shouldShowSingleBadge({hasAlt: false, isCropped: true, isWithinQuote: true}),
+            normalAltSingle: shouldShowSingleBadge({hasAlt: true, isCropped: false, isWithinQuote: false}),
+            noAltNoCropSingle: shouldShowSingleBadge({hasAlt: false, isCropped: false, isWithinQuote: false}),
+            quotedAltGrid: shouldShowGridAlt({hasAlt: true, isWithinQuote: true}),
+            normalAltGrid: shouldShowGridAlt({hasAlt: true, isWithinQuote: false}),
+            noAltGrid: shouldShowGridAlt({hasAlt: false, isWithinQuote: false}),
+          };
+
+          // Independent controls that must hold in both historical states.
+          assert.equal(cases.normalAltSingle, true, 'control: normal ALT badge must be visible');
+          assert.equal(cases.noAltNoCropSingle, false, 'control: no ALT/crop means no badge');
+          assert.equal(cases.normalAltGrid, true, 'control: normal grid ALT badge must be visible');
+          assert.equal(cases.noAltGrid, false, 'control: no ALT means no grid badge');
+
+          const evidence = {isPre, isFixed, preSingleCoupling, preGalleryCoupling, preGridCoupling, fixedSingle, fixedGallery, fixedGrid, cases};
+          console.log(JSON.stringify(evidence));
+
+          if (isPre) {
+            assert.equal(cases.quotedAltSingle, false, 'historical bug: quoted single-image ALT badge is suppressed');
+            assert.equal(cases.quotedCropSingle, false, 'historical coupling also suppresses crop badge in quotes');
+            assert.equal(cases.quotedAltGrid, false, 'historical bug: quoted grid ALT badge is suppressed');
+            process.exitCode = 42;
+          } else {
+            assert.equal(cases.quotedAltSingle, true, 'accepted fix must preserve ALT badge inside quote');
+            assert.equal(cases.quotedCropSingle, true, 'accepted fix must preserve crop badge inside quote');
+            assert.equal(cases.quotedAltGrid, true, 'accepted fix must preserve grid ALT badge inside quote');
+          }
+          JS
+
+      - name: Run B05 oracle
+        working-directory: b05-oracle
+        shell: bash
+        run: |
+          set +e
+          node oracle.cjs 2>&1 | tee b05.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [[ "${{ matrix.case.expect }}" == "fail" ]]; then
+            test "$rc" -eq 42
+            grep -F '"isPre":true' b05.log >/dev/null
+            grep -F '"quotedAltSingle":false' b05.log >/dev/null
+            grep -F '"quotedAltGrid":false' b05.log >/dev/null
+            echo 'EXPECTED: pre-fix quote layout suppresses ALT badges'
+          else
+            test "$rc" -eq 0
+            grep -F '"isFixed":true' b05.log >/dev/null
+            grep -F '"quotedAltSingle":true' b05.log >/dev/null
+            grep -F '"quotedAltGrid":true' b05.log >/dev/null
+            echo 'EXPECTED: accepted fix decouples quote layout from ALT badge visibility'
+          fi
+
+      - name: Upload B05 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: B05-${{ matrix.case.name }}-evidence
+          path: b05-oracle/b05.log
