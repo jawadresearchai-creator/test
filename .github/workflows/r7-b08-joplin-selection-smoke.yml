@@ -1,0 +1,98 @@
+name: R7 B08 Joplin Editor Selection Historical Smoke
+
+on:
+  push:
+    branches:
+      - r6-benchmark-harness-2026-09-08
+    paths:
+      - '.github/workflows/r7-b08-joplin-selection-smoke.yml'
+  workflow_dispatch:
+
+jobs:
+  b08-oracle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        case:
+          - name: pre_fix
+            sha: 8e7b1d763bb5aafc0d492802f8658541439e0c98
+            expect: fail
+          - name: human_fix
+            sha: 011a15374cc8a23438232a6698a0016fc10ea1ba
+            expect: pass
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout exact historical Joplin source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --filter=blob:none --no-checkout https://github.com/laurent22/joplin.git joplin
+          cd joplin
+          git checkout "${{ matrix.case.sha }}"
+          test "$(git rev-parse HEAD)" = "${{ matrix.case.sha }}"
+          # Fetch the accepted fix only for hidden-oracle test material. The implementation
+          # remains at the matrix snapshot; no fixed production source is copied in.
+          git fetch --no-tags origin 011a15374cc8a23438232a6698a0016fc10ea1ba
+          git show 011a15374cc8a23438232a6698a0016fc10ea1ba:packages/editor/CodeMirror/extensions/rendering/utils/makeInlineReplaceExtension.test.ts > /tmp/b08-fixed-test.ts
+          git show 011a15374cc8a23438232a6698a0016fc10ea1ba:packages/editor/CodeMirror/testing/visibleEditorText.ts > /tmp/b08-visibleEditorText.ts
+          cp /tmp/b08-fixed-test.ts packages/editor/CodeMirror/extensions/rendering/utils/makeInlineReplaceExtension.test.ts
+          cp /tmp/b08-visibleEditorText.ts packages/editor/CodeMirror/testing/visibleEditorText.ts
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install only Joplin editor workspace dependencies
+        working-directory: joplin
+        shell: bash
+        env:
+          YARN_ENABLE_SCRIPTS: 'false'
+        run: |
+          set -euxo pipefail
+          corepack enable
+          yarn --version
+          yarn workspaces focus @joplin/editor
+
+      - name: Run maintainer post-fix selection regression test
+        id: oracle
+        working-directory: joplin
+        shell: bash
+        run: |
+          set +e
+          yarn workspace @joplin/editor jest CodeMirror/extensions/rendering/utils/makeInlineReplaceExtension.test.ts --runInBand 2>&1 | tee ../b08.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+          if [[ "${{ matrix.case.expect }}" == "fail" ]]; then
+            test "$rc" -ne 0
+            grep -E 'should include Markdown syntax|Expected|Received|selection' ../b08.log >/dev/null
+            echo 'EXPECTED: historical implementation fails the maintainer post-fix selection invariant'
+          else
+            test "$rc" -eq 0
+            grep -E 'PASS|Tests:' ../b08.log >/dev/null
+            echo 'EXPECTED: accepted fix passes the maintainer selection regression test'
+          fi
+
+      - name: Source-strategy guard
+        working-directory: joplin
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if [[ "${{ matrix.case.expect }}" == "fail" ]]; then
+            ! test -f packages/editor/CodeMirror/extensions/rendering/utils/makeHideReplaceExtension.ts
+            grep -R "Decoration.replace({})" packages/editor/CodeMirror/extensions/rendering/replaceFormatCharacters.ts packages/editor/CodeMirror/extensions/rendering/replaceLinks.ts >/dev/null
+          else
+            test -f packages/editor/CodeMirror/extensions/rendering/utils/makeHideReplaceExtension.ts
+            grep -F "Decoration.mark({" packages/editor/CodeMirror/extensions/rendering/utils/makeHideReplaceExtension.ts >/dev/null
+            grep -F "width: '1px'" packages/editor/CodeMirror/extensions/rendering/utils/makeHideReplaceExtension.ts >/dev/null
+          fi
+
+      - name: Upload B08 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: B08-${{ matrix.case.name }}-evidence
+          path: b08.log
