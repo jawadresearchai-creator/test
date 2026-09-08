@@ -1,0 +1,243 @@
+name: R7 B03 Bluesky Esperanto Locale Crash
+
+on:
+  push:
+    branches:
+      - r6-benchmark-harness-2026-09-08
+    paths:
+      - '.github/workflows/r7-b03-bluesky-esperanto.yml'
+      - 'benchmarks/r7-b03-trigger.txt'
+  workflow_dispatch:
+
+jobs:
+  b03-oracle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        case:
+          - name: pre_fix
+            sha: 3e1e1ba00e60c7d4fe93f2e8e2d94cfc1385815f
+            mode: import_broken_eo
+            expected: fail
+          - name: human_fix
+            sha: 6275d2e0fdc9fbbecece44b4897525afa6009168
+            mode: english_fallback
+            expected: pass
+
+    steps:
+      - name: Checkout benchmark harness
+        uses: actions/checkout@v4
+
+      - name: Checkout exact historical Bluesky source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --filter=blob:none --no-checkout https://github.com/bluesky-social/social-app.git bluesky
+          cd bluesky
+          git checkout "${{ matrix.case.sha }}"
+          test "$(git rev-parse HEAD)" = "${{ matrix.case.sha }}"
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Verify historical source and dependency
+        shell: bash
+        env:
+          MODE: ${{ matrix.case.mode }}
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+          import os
+
+          source = Path('bluesky/src/locale/i18n.ts').read_text()
+          package = json.loads(Path('bluesky/package.json').read_text())
+          mode = os.environ['MODE']
+
+          assert package['dependencies']['@formatjs/intl-displaynames'] == '^6.8.13'
+          assert "import '@formatjs/intl-displaynames/polyfill-force'" in source
+          assert "import '@formatjs/intl-displaynames/locale-data/en'" in source
+
+          eo_case = source.split('case AppLanguage.eo:', 1)[1].split('case AppLanguage.es:', 1)[0]
+          assert "import('@formatjs/intl-pluralrules/locale-data/eo')" in eo_case
+          assert "import('@formatjs/intl-numberformat/locale-data/eo')" in eo_case
+
+          display_line = "import('@formatjs/intl-displaynames/locale-data/eo')"
+          if mode == 'import_broken_eo':
+              assert display_line in eo_case
+              assert f'// {display_line}' not in eo_case
+              print('SOURCE_GUARD: pre-fix Esperanto branch loads intl-displaynames eo locale data')
+          elif mode == 'english_fallback':
+              assert f'// {display_line}' in eo_case
+              print('SOURCE_GUARD: accepted fix skips broken Esperanto displaynames data')
+          else:
+              raise AssertionError(mode)
+          PY
+
+      - name: Resolve exact historical intl-displaynames lock version
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY' > /tmp/version.env
+          from pathlib import Path
+          import re
+          text = Path('bluesky/yarn.lock').read_text()
+          pattern = r'"@formatjs/intl-displaynames@\^6\.8\.13":\n\s+version "([^"]+)"'
+          m = re.search(pattern, text)
+          if not m:
+              raise SystemExit('Could not locate direct intl-displaynames lock entry')
+          print(f'DISPLAYNAMES_VERSION={m.group(1)}')
+          PY
+          cat /tmp/version.env
+          grep -Fx 'DISPLAYNAMES_VERSION=6.8.13' /tmp/version.env
+          cat /tmp/version.env >> "$GITHUB_ENV"
+
+      - name: Build isolated native-polyfill oracle
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p b03-oracle
+          cat > b03-oracle/package.json <<JSON
+          {
+            "private": true,
+            "dependencies": {
+              "@formatjs/intl-displaynames": "${DISPLAYNAMES_VERSION}"
+            }
+          }
+          JSON
+
+          cat > b03-oracle/oracle.cjs <<'JS'
+          const fs = require('fs');
+          const path = require('path');
+          const mode = process.env.MODE;
+
+          require('@formatjs/intl-displaynames/polyfill-force');
+          require('@formatjs/intl-displaynames/locale-data/en');
+
+          // Independent control: a normal non-English locale-data module must
+          // register data and render without error under the same forced polyfill.
+          require('@formatjs/intl-displaynames/locale-data/es');
+          const spanish = new Intl.DisplayNames(['es'], { type: 'language' });
+          const controlValue = spanish.of('en');
+          if (!controlValue || typeof controlValue !== 'string') {
+            throw new Error('CONTROL_FAILURE: Spanish display names did not render');
+          }
+          console.log(`CONTROL_PASS: es(en)=${controlValue}`);
+
+          const eoPath = require.resolve('@formatjs/intl-displaynames/locale-data/eo');
+          const eoSource = fs.readFileSync(eoPath, 'utf8');
+          console.log(`EO_LOCALE_FILE_BYTES=${Buffer.byteLength(eoSource)}`);
+
+          if (mode === 'import_broken_eo') {
+            // Mirrors the pre-fix Esperanto branch: load eo DisplayNames data.
+            require('@formatjs/intl-displaynames/locale-data/eo');
+          } else if (mode === 'english_fallback') {
+            // Mirrors the accepted fix: intentionally do not load the broken
+            // Esperanto DisplayNames locale module. English was loaded at startup.
+          } else {
+            throw new Error(`Unknown mode ${mode}`);
+          }
+
+          const display = new Intl.DisplayNames(['eo'], { type: 'language' });
+          const value = display.of('en');
+          if (!value || typeof value !== 'string') {
+            throw new Error('PRIMARY_FAILURE: Esperanto language display name unavailable');
+          }
+          console.log(`PRIMARY_PASS: eo request resolved as ${display.resolvedOptions().locale}; value=${value}`);
+          JS
+
+      - name: Install exact historical FormatJS package
+        working-directory: b03-oracle
+        shell: bash
+        run: npm install --no-audit --no-fund
+
+      - name: Run independent control
+        working-directory: b03-oracle
+        shell: bash
+        env:
+          MODE: english_fallback
+        run: |
+          set -o pipefail
+          node oracle.cjs 2>&1 | tee b03-control.log
+          grep -F 'CONTROL_PASS:' b03-control.log >/dev/null
+
+      - name: Run B03 primary oracle
+        id: oracle
+        working-directory: b03-oracle
+        shell: bash
+        env:
+          MODE: ${{ matrix.case.mode }}
+          EXPECTED: ${{ matrix.case.expected }}
+        run: |
+          set +e
+          node oracle.cjs 2>&1 | tee b03-primary.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+
+          grep -F 'CONTROL_PASS:' b03-primary.log >/dev/null
+          grep -F 'EO_LOCALE_FILE_BYTES=' b03-primary.log >/dev/null
+
+          if [[ "$EXPECTED" == 'fail' ]]; then
+            if [[ "$rc" -eq 0 ]]; then
+              echo 'ERROR: pre-fix Esperanto import unexpectedly succeeded'
+              exit 1
+            fi
+            # Guard against setup failures: the log must have reached the eo
+            # locale import/DisplayNames boundary after the control passed.
+            if ! grep -E 'locale|Locale|DisplayNames|Cannot|undefined|data' b03-primary.log >/dev/null; then
+              echo 'ERROR: failure signature does not match locale-data boundary'
+              exit 1
+            fi
+            echo 'EXPECTED: pre-fix Esperanto locale-data path crashes'
+          else
+            if [[ "$rc" -ne 0 ]]; then
+              echo 'ERROR: accepted fix did not preserve English fallback'
+              exit "$rc"
+            fi
+            grep -F 'PRIMARY_PASS:' b03-primary.log >/dev/null
+            echo 'EXPECTED: accepted fix avoids the broken eo locale module and falls back safely'
+          fi
+
+      - name: Write machine-readable evidence
+        if: always()
+        shell: bash
+        env:
+          CASE_NAME: ${{ matrix.case.name }}
+          SOURCE_SHA: ${{ matrix.case.sha }}
+          MODE: ${{ matrix.case.mode }}
+          EXPECTED: ${{ matrix.case.expected }}
+          ORACLE_EXIT_CODE: ${{ steps.oracle.outputs.exit_code }}
+        run: |
+          mkdir -p evidence
+          cp b03-oracle/b03-primary.log evidence/ 2>/dev/null || true
+          cp b03-oracle/b03-control.log evidence/ 2>/dev/null || true
+          python3 - <<'PY'
+          import json, os
+          data = {
+              'schema_version': '1.0',
+              'benchmark_id': 'B03',
+              'case': os.environ['CASE_NAME'],
+              'source_sha': os.environ['SOURCE_SHA'],
+              'mode': os.environ['MODE'],
+              'expected_oracle': os.environ['EXPECTED'],
+              'oracle_exit_code': os.environ.get('ORACLE_EXIT_CODE', ''),
+              'intl_displaynames_version': os.environ['DISPLAYNAMES_VERSION'],
+              'workflow_run_id': os.environ['GITHUB_RUN_ID'],
+              'workflow_run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+          }
+          with open(f"evidence/B03-{os.environ['CASE_NAME']}.json", 'w') as f:
+              json.dump(data, f, indent=2)
+          PY
+
+      - name: Upload B03 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: B03-${{ matrix.case.name }}-evidence
+          path: evidence/
