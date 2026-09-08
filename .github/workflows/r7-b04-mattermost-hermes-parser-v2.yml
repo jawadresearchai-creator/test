@@ -1,0 +1,219 @@
+name: R7 B04 Mattermost Hermes Markdown Parser v2
+
+on:
+  push:
+    branches:
+      - r6-benchmark-harness-2026-09-08
+    paths:
+      - '.github/workflows/r7-b04-mattermost-hermes-parser-v2.yml'
+      - 'benchmarks/r7-b04-v2-trigger.txt'
+  workflow_dispatch:
+
+jobs:
+  b04-oracle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        case:
+          - name: pre_fix
+            mobile_sha: 94a6b9bcb1c1c7983548f73e4004fd8ad93874d3
+            parser_sha: 9ebe192ca8d2b3db4955931990d6639d21fc79de
+            commonmark_version: 0.30.1-2
+            expected: fail
+          - name: human_fix
+            mobile_sha: a41f1a867df28b56e758623a86f344ab0c6fcbf0
+            parser_sha: 238f58ca51f39e2ca8dbe606cdac61c12b653683
+            commonmark_version: 0.30.1-3
+            expected: pass
+
+    steps:
+      - name: Checkout benchmark harness
+        uses: actions/checkout@v4
+
+      - name: Checkout exact historical mobile and parser sources
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --filter=blob:none --no-checkout https://github.com/mattermost/mattermost-mobile.git mobile
+          git -C mobile checkout "${{ matrix.case.mobile_sha }}"
+          test "$(git -C mobile rev-parse HEAD)" = "${{ matrix.case.mobile_sha }}"
+
+          git clone --filter=blob:none --no-checkout https://github.com/mattermost/commonmark.js.git commonmark
+          git -C commonmark checkout "${{ matrix.case.parser_sha }}"
+          test "$(git -C commonmark rev-parse HEAD)" = "${{ matrix.case.parser_sha }}"
+
+      - name: Verify cross-repository linkage and Hermes release family
+        shell: bash
+        env:
+          EXPECTED_VERSION: ${{ matrix.case.commonmark_version }}
+          EXPECTED: ${{ matrix.case.expected }}
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json, os
+          pkg = json.loads(Path('mobile/package.json').read_text())
+          assert pkg['dependencies']['react-native'] == '0.74.5'
+          assert pkg['dependencies']['commonmark'] == f"npm:@mattermost/commonmark@{os.environ['EXPECTED_VERSION']}"
+          blocks = Path('commonmark/lib/blocks.js').read_text()
+          if os.environ['EXPECTED'] == 'fail':
+              assert 'reTableDelimiter' in blocks and 'parseDelimiterRow' not in blocks
+              print('SOURCE_GUARD: pre-fix mobile -> commonmark -2 -> complex delimiter regex')
+          else:
+              assert 'reTableDelimiter' not in blocks
+              assert 'parseDelimiterRow' in blocks and 'reValidTableDelimiter' in blocks
+              print('SOURCE_GUARD: fixed mobile -> commonmark -3 -> structural delimiter validation')
+          PY
+
+      - name: Verify RN 0.74.5 bundled hermesc reports Hermes 0.12.0
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p rn-package
+          cd rn-package
+          tgz=$(npm pack react-native@0.74.5 --silent)
+          tar -xzf "$tgz"
+          HERMESC=$(find package/sdks/hermesc -type f -name hermesc | head -n 1)
+          chmod +x "$HERMESC"
+          "$HERMESC" -version 2>&1 | tee hermesc-version.log
+          grep -F 'Hermes release version: 0.12.0' hermesc-version.log
+
+      - name: Download matching Hermes 0.12.0 Linux runtime
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p hermes-runtime
+          curl -fL --retry 3 \
+            https://github.com/facebook/hermes/releases/download/v0.12.0/hermes-cli-linux-v0.12.0.tar.gz \
+            -o hermes-runtime/hermes.tar.gz
+          tar -xzf hermes-runtime/hermes.tar.gz -C hermes-runtime
+          HERMES=$(find hermes-runtime -type f -name hermes | head -n 1)
+          test -n "$HERMES"
+          chmod +x "$HERMES"
+          "$HERMES" --version 2>&1 | tee hermes-runtime/version.log || true
+          echo "HERMES=$PWD/$HERMES" >> "$GITHUB_ENV"
+
+      - name: Build exact-parser Hermes scripts
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p b04-oracle
+          cp commonmark/dist/commonmark.js b04-oracle/commonmark.js
+
+          cat b04-oracle/commonmark.js > b04-oracle/control.js
+          cat >> b04-oracle/control.js <<'JS'
+          ;(function () {
+            function assert(cond, message) { if (!cond) throw new Error(message) }
+            var ParserCtor = this.commonmark && this.commonmark.Parser
+            assert(typeof ParserCtor === 'function', 'SETUP_FAILURE: commonmark Parser unavailable')
+            var parser = new ParserCtor()
+            var valid = ['| A | B | C |', '| --- | --- | --- |', '| D | E | F |'].join('\n')
+            var ast = parser.parse(valid)
+            assert(ast.firstChild && ast.firstChild.type === 'table', 'CONTROL_FAILURE: valid table not parsed')
+            print('CONTROL_PASS: valid Markdown table parsed as table')
+          }).call(this)
+          JS
+
+          cat b04-oracle/commonmark.js > b04-oracle/primary.js
+          cat >> b04-oracle/primary.js <<'JS'
+          ;(function () {
+            function assert(cond, message) { if (!cond) throw new Error(message) }
+            var ParserCtor = this.commonmark && this.commonmark.Parser
+            assert(typeof ParserCtor === 'function', 'SETUP_FAILURE: commonmark Parser unavailable')
+            var parser = new ParserCtor()
+            var malformed = [
+              '| A | B | C | | |',
+              '| :--------------------------------: | :----------------------------: | :----------------- --------------: | :-----------: |:-----------: |',
+              '|D | E | F | G | H |',
+              '| | J | K | | |'
+            ].join('\n')
+            var ast = parser.parse(malformed)
+            var type = ast.firstChild && ast.firstChild.type
+            print('PRIMARY_TYPE=' + type)
+            assert(type === 'paragraph', 'PRIMARY_FAILURE: malformed table must remain paragraph')
+            print('PRIMARY_PASS: malformed table rejected without regex-engine crash')
+          }).call(this)
+          JS
+
+      - name: Run independent valid-table control in Hermes
+        shell: bash
+        run: |
+          set -o pipefail
+          "$HERMES" b04-oracle/control.js 2>&1 | tee b04-control.log
+          grep -F 'CONTROL_PASS:' b04-control.log >/dev/null
+
+      - name: Run B04 primary Hermes oracle
+        id: oracle
+        shell: bash
+        env:
+          EXPECTED: ${{ matrix.case.expected }}
+        run: |
+          set +e
+          "$HERMES" b04-oracle/primary.js 2>&1 | tee b04-primary.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+
+          if [[ "$EXPECTED" == 'fail' ]]; then
+            if [[ "$rc" -eq 0 ]]; then
+              echo 'ERROR: pre-fix parser did not reproduce the Hermes failure'
+              exit 1
+            fi
+            if ! grep -Ei 'regex|stack|overflow|maximum|RangeError|error' b04-primary.log >/dev/null; then
+              echo 'ERROR: failure signature does not match parser/regex boundary'
+              exit 1
+            fi
+            echo 'EXPECTED: pre-fix malformed-table parser fails under Hermes 0.12.0'
+          else
+            if [[ "$rc" -ne 0 ]]; then
+              echo 'ERROR: accepted parser fix failed primary oracle'
+              exit "$rc"
+            fi
+            grep -F 'PRIMARY_PASS:' b04-primary.log >/dev/null
+            echo 'EXPECTED: accepted parser fix safely rejects malformed table'
+          fi
+
+      - name: Write machine-readable evidence
+        if: always()
+        shell: bash
+        env:
+          CASE_NAME: ${{ matrix.case.name }}
+          MOBILE_SHA: ${{ matrix.case.mobile_sha }}
+          PARSER_SHA: ${{ matrix.case.parser_sha }}
+          COMMONMARK_VERSION: ${{ matrix.case.commonmark_version }}
+          EXPECTED: ${{ matrix.case.expected }}
+          ORACLE_EXIT_CODE: ${{ steps.oracle.outputs.exit_code }}
+        run: |
+          mkdir -p evidence
+          cp b04-control.log evidence/ 2>/dev/null || true
+          cp b04-primary.log evidence/ 2>/dev/null || true
+          cp rn-package/hermesc-version.log evidence/ 2>/dev/null || true
+          cp hermes-runtime/version.log evidence/ 2>/dev/null || true
+          python3 - <<'PY'
+          import json, os
+          data = {
+              'schema_version': '1.1',
+              'benchmark_id': 'B04',
+              'case': os.environ['CASE_NAME'],
+              'mobile_source_sha': os.environ['MOBILE_SHA'],
+              'parser_source_sha': os.environ['PARSER_SHA'],
+              'commonmark_version': os.environ['COMMONMARK_VERSION'],
+              'react_native_version': '0.74.5',
+              'hermes_release': '0.12.0',
+              'expected_oracle': os.environ['EXPECTED'],
+              'oracle_exit_code': os.environ.get('ORACLE_EXIT_CODE', ''),
+              'workflow_run_id': os.environ['GITHUB_RUN_ID'],
+              'workflow_run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+          }
+          with open(f"evidence/B04-{os.environ['CASE_NAME']}.json", 'w') as f:
+              json.dump(data, f, indent=2)
+          PY
+
+      - name: Upload B04 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: B04-${{ matrix.case.name }}-evidence-v2
+          path: evidence/
