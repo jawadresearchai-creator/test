@@ -1,0 +1,109 @@
+name: R6 B06 MetaMask Historical Smoke
+
+on:
+  push:
+    branches:
+      - r6-benchmark-harness-2026-09-08
+  workflow_dispatch:
+
+jobs:
+  b06-oracle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        case:
+          - name: pre_fix
+            sha: d8e8e568340140f4e50ab9e121378cfcea41e885
+            expect: fail
+          - name: human_fix
+            sha: 84ca8bd1aa90363d4a3a90c5ae400bebfa225156
+            expect: pass
+    steps:
+      - name: Checkout benchmark harness
+        uses: actions/checkout@v4
+
+      - name: Checkout historical MetaMask Mobile
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --filter=blob:none --no-checkout https://github.com/MetaMask/metamask-mobile.git metamask-mobile
+          cd metamask-mobile
+          git checkout "${{ matrix.case.sha }}"
+          git rev-parse HEAD
+
+      - name: Set up Node 20.18.0
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.18.0
+          cache: yarn
+          cache-dependency-path: metamask-mobile/yarn.lock
+
+      - name: Enable Corepack
+        shell: bash
+        run: corepack enable
+
+      - name: Install dependencies
+        working-directory: metamask-mobile
+        shell: bash
+        run: yarn install --immutable
+
+      - name: Inject accepted regression test into pre-fix snapshot
+        if: matrix.case.name == 'pre_fix'
+        working-directory: metamask-mobile
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git fetch --depth=1 origin 84ca8bd1aa90363d4a3a90c5ae400bebfa225156
+          git show 84ca8bd1aa90363d4a3a90c5ae400bebfa225156:app/components/Views/confirmations/components/confirmation-asset-polling-provider/confirmation-asset-polling-provider.test.tsx \
+            > app/components/Views/confirmations/components/confirmation-asset-polling-provider/confirmation-asset-polling-provider.test.tsx
+
+      - name: Run B06 regression oracle
+        id: oracle
+        working-directory: metamask-mobile
+        shell: bash
+        run: |
+          set +e
+          yarn jest app/components/Views/confirmations/components/confirmation-asset-polling-provider/confirmation-asset-polling-provider.test.tsx --runInBand
+          rc=$?
+          set -e
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+          if [[ "${{ matrix.case.expect }}" == "fail" ]]; then
+            if [[ "$rc" -eq 0 ]]; then
+              echo "ERROR: pre-fix snapshot unexpectedly passed the accepted regression oracle"
+              exit 1
+            fi
+            echo "EXPECTED: pre-fix snapshot fails the accepted regression oracle"
+          else
+            if [[ "$rc" -ne 0 ]]; then
+              echo "ERROR: accepted human fix did not pass its regression oracle"
+              exit "$rc"
+            fi
+            echo "EXPECTED: accepted human fix passes the regression oracle"
+          fi
+
+      - name: Write machine-readable smoke evidence
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p evidence
+          cat > evidence/B06-${{ matrix.case.name }}.json <<JSON
+          {
+            "schema_version": "1.0",
+            "benchmark_id": "B06",
+            "case": "${{ matrix.case.name }}",
+            "source_sha": "${{ matrix.case.sha }}",
+            "expected_oracle": "${{ matrix.case.expect }}",
+            "oracle_exit_code": "${{ steps.oracle.outputs.exit_code }}",
+            "workflow_run_id": "${{ github.run_id }}",
+            "workflow_run_attempt": "${{ github.run_attempt }}"
+          }
+          JSON
+
+      - name: Upload smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: B06-${{ matrix.case.name }}-evidence
+          path: evidence/
