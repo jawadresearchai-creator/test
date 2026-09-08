@@ -1,0 +1,136 @@
+name: R7 B04 Mattermost CommonMark Historical Smoke
+
+on:
+  push:
+    branches:
+      - r6-benchmark-harness-2026-09-08
+    paths:
+      - '.github/workflows/r7-b04-mattermost-commonmark-smoke.yml'
+  workflow_dispatch:
+
+jobs:
+  b04-oracle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        case:
+          - name: pre_fix
+            parser_sha: 9ebe192ca8d2b3db4955931990d6639d21fc79de
+            mobile_sha: 94a6b9bcb1c1c7983548f73e4004fd8ad93874d3
+            mobile_version: 0.30.1-2
+            expect: fail
+          - name: human_fix
+            parser_sha: 238f58ca51f39e2ca8dbe606cdac61c12b653683
+            mobile_sha: a41f1a867df28b56e758623a86f344ab0c6fcbf0
+            mobile_version: 0.30.1-3
+            expect: pass
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout exact historical parser and mobile source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --filter=blob:none --no-checkout https://github.com/mattermost/commonmark.js.git commonmark
+          cd commonmark
+          git checkout "${{ matrix.case.parser_sha }}"
+          test "$(git rev-parse HEAD)" = "${{ matrix.case.parser_sha }}"
+          cd ..
+          git clone --filter=blob:none --no-checkout https://github.com/mattermost/mattermost-mobile.git mobile
+          cd mobile
+          git checkout "${{ matrix.case.mobile_sha }}"
+          test "$(git rev-parse HEAD)" = "${{ matrix.case.mobile_sha }}"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install and build historical CommonMark fork
+        working-directory: commonmark
+        run: |
+          npm install --no-audit --no-fund
+          npm run build
+
+      - name: Build cross-repository oracle
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p b04-oracle
+          cp commonmark/lib/blocks.js b04-oracle/blocks.js
+          cp mobile/package.json b04-oracle/mobile-package.json
+          cat > b04-oracle/oracle.cjs <<'JS'
+          const fs = require('node:fs');
+          const assert = require('node:assert/strict');
+          const commonmark = require('../commonmark/dist/commonmark.js');
+
+          const blocks = fs.readFileSync('./blocks.js', 'utf8');
+          const pkg = JSON.parse(fs.readFileSync('./mobile-package.json', 'utf8'));
+          const dep = String(pkg.dependencies.commonmark || '');
+
+          const oldComplexRegex = /var reTableDelimiter =/.test(blocks);
+          const stepwiseDelimiterParser = /parseDelimiterRow/.test(blocks) && /reValidTableDelimiter/.test(blocks);
+          assert.notEqual(oldComplexRegex, stepwiseDelimiterParser, 'expected exactly one historical table-delimiter strategy');
+
+          const reader = new commonmark.Parser();
+          const writer = new commonmark.HtmlRenderer();
+
+          const valid = 'foo|bar\n---|---\none|two\n';
+          const validHtml = writer.render(reader.parse(valid));
+          assert.match(validHtml, /<table>/, 'control: a valid table must remain a table');
+
+          const malformed = '| A | B | C | | |\n| :--------------------------------: | :----------------------------: | :----------------- --------------: | :-----------: |:-----------: |\n|D | E | F | G | H |\n| | J | K | | |\n';
+          const malformedHtml = writer.render(reader.parse(malformed));
+
+          const evidence = {
+            oldComplexRegex,
+            stepwiseDelimiterParser,
+            mobileCommonmarkDependency: dep,
+            validIsTable: /<table>/.test(validHtml),
+            malformedIsTable: /<table>/.test(malformedHtml),
+            malformedIsParagraph: /<p>/.test(malformedHtml),
+          };
+          console.log(JSON.stringify(evidence));
+
+          assert.ok(dep.includes('${{ matrix.case.mobile_version }}'), 'mobile snapshot must consume the expected parser release');
+
+          if (oldComplexRegex) {
+            // The historical parser uses the single complex delimiter regex that Mattermost
+            // identified as incompatible with React Native regex behavior. Node/V8 may parse
+            // this fixture without crashing, so the RN crash itself is an extended native gate.
+            process.exitCode = 42;
+          } else {
+            assert.equal(stepwiseDelimiterParser, true);
+            assert.equal(/<table>/.test(malformedHtml), false, 'invalid delimiter must not become a table');
+            assert.equal(/<p>/.test(malformedHtml), true, 'invalid delimiter should remain ordinary paragraph content');
+          }
+          JS
+
+      - name: Run B04 oracle
+        working-directory: b04-oracle
+        shell: bash
+        run: |
+          set +e
+          node oracle.cjs 2>&1 | tee b04.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [[ "${{ matrix.case.expect }}" == "fail" ]]; then
+            test "$rc" -eq 42
+            grep -F '"oldComplexRegex":true' b04.log >/dev/null
+            grep -F '0.30.1-2' b04.log >/dev/null
+            echo 'EXPECTED: pre-fix mobile consumes parser with RN-incompatible complex delimiter regex'
+          else
+            test "$rc" -eq 0
+            grep -F '"stepwiseDelimiterParser":true' b04.log >/dev/null
+            grep -F '0.30.1-3' b04.log >/dev/null
+            grep -F '"malformedIsTable":false' b04.log >/dev/null
+            echo 'EXPECTED: fixed parser validates delimiter cells stepwise and mobile consumes corrected release'
+          fi
+
+      - name: Upload B04 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: B04-${{ matrix.case.name }}-evidence
+          path: b04-oracle/b04.log
