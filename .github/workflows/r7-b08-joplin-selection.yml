@@ -1,0 +1,167 @@
+name: R7 B08 Joplin Markdown Selection Regression
+
+on:
+  push:
+    branches:
+      - r6-benchmark-harness-2026-09-08
+    paths:
+      - '.github/workflows/r7-b08-joplin-selection.yml'
+      - 'benchmarks/r7-b08-trigger.txt'
+  workflow_dispatch:
+
+jobs:
+  b08-oracle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        case:
+          - name: pre_fix
+            sha: 8e7b1d763bb5aafc0d492802f8658541439e0c98
+            expected_selection_mutation: true
+          - name: human_fix
+            sha: 011a15374cc8a23438232a6698a0016fc10ea1ba
+            expected_selection_mutation: false
+
+    steps:
+      - name: Checkout benchmark harness
+        uses: actions/checkout@v4
+
+      - name: Checkout exact historical Joplin source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --filter=blob:none --no-checkout https://github.com/laurent22/joplin.git joplin
+          git -C joplin checkout "${{ matrix.case.sha }}"
+          test "$(git -C joplin rev-parse HEAD)" = "${{ matrix.case.sha }}"
+
+      - name: Build exact-source selection oracle
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p b08-oracle
+          cp joplin/packages/editor/CodeMirror/extensions/rendering/utils/makeInlineReplaceExtension.ts b08-oracle/source.ts
+          cat > b08-oracle/oracle.py <<'PY'
+          from pathlib import Path
+          import json
+          import os
+          import re
+
+          source = Path('source.ts').read_text()
+
+          # Isolate the exact mouse-up handler rather than searching unrelated
+          # editor code. The next method boundary is updateDecorations.
+          m = re.search(
+              r'private onMouseUp = \(\) => \{(?P<body>.*?)\n\t\};\n\n\tprivate updateDecorations',
+              source,
+              flags=re.S,
+          )
+          if not m:
+              raise RuntimeError('SETUP_FAILURE: onMouseUp handler not found')
+          body = m.group('body')
+
+          dispatches_decorations = 'updateInlineDecorationsEffect.of(null)' in body
+          mutates_selection = bool(re.search(r'\bselection\s*:\s*selectionUpdate\b', body))
+          manually_expands_selection = 'expandSelectionToFormattingCharacters' in body
+          defers_until_gesture_end = 'requestAnimationFrame' in body
+
+          # Independent control: both historical states must still dispatch the
+          # decoration refresh at mouse-up. Otherwise a missing dispatch could
+          # masquerade as the selection-regression fix.
+          if not dispatches_decorations:
+              raise RuntimeError('CONTROL_FAILURE: mouseup no longer refreshes decorations')
+          print('CONTROL_PASS: mouseup still refreshes inline decorations')
+
+          result = {
+              'dispatchesDecorations': dispatches_decorations,
+              'mutatesSelection': mutates_selection,
+              'manuallyExpandsSelection': manually_expands_selection,
+              'defersUntilGestureEnd': defers_until_gesture_end,
+          }
+          print(json.dumps(result, indent=2))
+
+          expected = os.environ['EXPECTED_SELECTION_MUTATION'].lower() == 'true'
+          if mutates_selection != expected:
+              raise RuntimeError(
+                  f'SETUP_FAILURE: expected selection-mutation shape {expected}, got {mutates_selection}'
+              )
+
+          if mutates_selection:
+              raise RuntimeError(
+                  'PRIMARY_FAILURE: mouseup rewrites editor selection and can scroll iOS back to the previous selection'
+              )
+
+          if manually_expands_selection:
+              raise RuntimeError('PRIMARY_FAILURE: manual selection-expansion path still present')
+          if not defers_until_gesture_end:
+              raise RuntimeError('PRIMARY_FAILURE: decoration refresh is not deferred after gesture end')
+
+          print('PRIMARY_PASS: mouseup preserves native selection and only refreshes decorations after the gesture')
+          PY
+
+      - name: Run B08 control and primary oracle
+        id: oracle
+        working-directory: b08-oracle
+        shell: bash
+        env:
+          EXPECTED_SELECTION_MUTATION: ${{ matrix.case.expected_selection_mutation }}
+        run: |
+          set +e
+          python3 oracle.py 2>&1 | tee b08-oracle.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+
+          grep -F 'CONTROL_PASS:' b08-oracle.log >/dev/null
+          if [[ "$EXPECTED_SELECTION_MUTATION" == 'true' ]]; then
+            if [[ "$rc" -eq 0 ]]; then
+              echo 'ERROR: pre-fix source unexpectedly preserved selection'
+              exit 1
+            fi
+            grep -F 'PRIMARY_FAILURE: mouseup rewrites editor selection' b08-oracle.log >/dev/null
+            echo 'EXPECTED: pre-fix mouseup path rewrites selection'
+          else
+            if [[ "$rc" -ne 0 ]]; then
+              echo 'ERROR: accepted fix did not preserve selection semantics'
+              exit "$rc"
+            fi
+            grep -F 'PRIMARY_PASS:' b08-oracle.log >/dev/null
+            echo 'EXPECTED: accepted fix preserves selection and defers decoration refresh'
+          fi
+
+      - name: Write machine-readable evidence
+        if: always()
+        shell: bash
+        env:
+          CASE_NAME: ${{ matrix.case.name }}
+          SOURCE_SHA: ${{ matrix.case.sha }}
+          EXPECTED_SELECTION_MUTATION: ${{ matrix.case.expected_selection_mutation }}
+          ORACLE_EXIT_CODE: ${{ steps.oracle.outputs.exit_code }}
+        run: |
+          mkdir -p evidence
+          cp b08-oracle/b08-oracle.log evidence/ 2>/dev/null || true
+          python3 - <<'PY'
+          import json, os
+          data = {
+              'schema_version': '1.0',
+              'benchmark_id': 'B08',
+              'case': os.environ['CASE_NAME'],
+              'source_sha': os.environ['SOURCE_SHA'],
+              'expected_selection_mutation': os.environ['EXPECTED_SELECTION_MUTATION'],
+              'oracle_exit_code': os.environ.get('ORACLE_EXIT_CODE', ''),
+              'workflow_run_id': os.environ['GITHUB_RUN_ID'],
+              'workflow_run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+              'oracle_kind': 'exact-source mouseup selection semantics',
+              'extended_certification': 'iOS simulator/physical-device gesture and scroll verification',
+          }
+          with open(f"evidence/B08-{os.environ['CASE_NAME']}.json", 'w') as f:
+              json.dump(data, f, indent=2)
+          PY
+
+      - name: Upload B08 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: B08-${{ matrix.case.name }}-evidence
+          path: evidence/
