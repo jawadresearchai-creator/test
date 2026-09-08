@@ -1,0 +1,117 @@
+{
+  "schema_version": "1.0",
+  "created_at": "2026-09-08",
+  "suite": "R8-blind-gemini-antigravity",
+  "agent_visible": false,
+  "warning": "Evaluator-only answer-key metadata. Never place this file in an agent workspace.",
+  "canonical_oracle_suite_report": "benchmarks/R7_ORACLE_SUITE_REPORT.md",
+  "run_protocol": "benchmarks/r8/R8_RUN_PROTOCOL.md",
+  "agent_packets": "benchmarks/r8/AGENT_TASK_PACKETS.md",
+  "benchmarks": [
+    {
+      "id": "B01",
+      "project": "Joplin",
+      "upstream_repositories": ["laurent22/joplin"],
+      "start_shas": ["134064c8296880d63b64ddc6e3743fc6dc926cf7"],
+      "golden_shas": ["385a78dc208ab426b2a0b0abb254e7978e77d8c6"],
+      "canonical_workflow": ".github/workflows/r6-b01-joplin-smoke.yml",
+      "validated_run_id": "34188332123",
+      "oracle_class": "exact-source filesystem path semantics",
+      "extended_gate": "Android scoped-storage integration and iOS preservation"
+    },
+    {
+      "id": "B02",
+      "project": "MetaMask Mobile",
+      "upstream_repositories": ["MetaMask/metamask-mobile"],
+      "start_shas": ["8e156ce8cabc6c89451bd8b91873646bc2740fbd"],
+      "golden_shas": ["0439337d1c7456a9c18772daed85b07d0f7ee8d0"],
+      "canonical_workflow": ".github/workflows/r7-b02-metamask-selector-oracle.yml",
+      "validated_run_id": "34195951747",
+      "oracle_class": "exact-source Reselect memoization",
+      "expected_pre_fix_signal": "A-B-equivalent-A result recomputations=3",
+      "expected_golden_signal": "A-B-equivalent-A result recomputations=2"
+    },
+    {
+      "id": "B03",
+      "project": "Bluesky Social App",
+      "upstream_repositories": ["bluesky-social/social-app"],
+      "start_shas": ["3e1e1ba00e60c7d4fe93f2e8e2d94cfc1385815f"],
+      "golden_shas": ["6275d2e0fdc9fbbecece44b4897525afa6009168"],
+      "canonical_workflow": ".github/workflows/r7-b03-bluesky-esperanto.yml",
+      "validated_run_id": "34194084427",
+      "oracle_class": "historical FormatJS locale-data runtime",
+      "historical_dependency": "@formatjs/intl-displaynames 6.8.13"
+    },
+    {
+      "id": "B04",
+      "project": "Mattermost Mobile + CommonMark fork",
+      "upstream_repositories": ["mattermost/mattermost-mobile", "mattermost/commonmark.js"],
+      "start_shas": [
+        "94a6b9bcb1c1c7983548f73e4004fd8ad93874d3",
+        "9ebe192ca8d2b3db4955931990d6639d21fc79de"
+      ],
+      "golden_shas": [
+        "a41f1a867df28b56e758623a86f344ab0c6fcbf0",
+        "238f58ca51f39e2ca8dbe606cdac61c12b653683"
+      ],
+      "canonical_workflow": ".github/workflows/r7-b04-mattermost-commonmark-smoke.yml",
+      "validated_run_id": "34191657988",
+      "oracle_class": "cross-repository parser mechanism + malformed-input behavior",
+      "extended_gate": "historical Android Hermes-0.12/HBC-96 runtime crash reproduction",
+      "excluded_experimental_run": {
+        "run_id": "34195008623",
+        "reason": "environment acquisition stopped at a nonexistent guessed Hermes CLI download URL before oracle execution"
+      }
+    },
+    {
+      "id": "B05",
+      "project": "Bluesky Social App",
+      "upstream_repositories": ["bluesky-social/social-app"],
+      "start_shas": ["dd452a433638789618e875b96d511c9aeadb99ac"],
+      "golden_shas": ["495d1fe9a7a7d9b447eb7bb64e88b915bf0bb1f6"],
+      "canonical_workflow": ".github/workflows/r7-b05-bluesky-alt-badge-smoke.yml",
+      "validated_run_id": "34191856422",
+      "oracle_class": "source-semantic accessibility/visual invariant",
+      "extended_gate": "native rendering, accessibility inspection, screenshot comparison"
+    },
+    {
+      "id": "B06",
+      "project": "MetaMask Mobile",
+      "upstream_repositories": ["MetaMask/metamask-mobile"],
+      "start_shas": ["d8e8e568340140f4e50ab9e121378cfcea41e885"],
+      "golden_shas": ["84ca8bd1aa90363d4a3a90c5ae400bebfa225156"],
+      "canonical_workflow": ".github/workflows/r6-b06-metamask-smoke.yml",
+      "validated_run_id": "34188410302",
+      "oracle_class": "exact-source React component polling-chain semantics"
+    },
+    {
+      "id": "B07",
+      "project": "Immich",
+      "upstream_repositories": ["immich-app/immich"],
+      "start_shas": ["c5fbbee8f68e5c9099710330f9903c4648e14c58"],
+      "intermediate_regressive_shas": ["5116b215a240b102d6109ed39d105cad6b77b641"],
+      "golden_shas": ["7d8cd05bc2113406d621cc2ed0746b5915d3d3c5"],
+      "canonical_workflow": ".github/workflows/r6-b07-immich-smoke.yml",
+      "validated_run_id": "34187899803",
+      "oracle_class": "Flutter/Drift three-state local-remote reconciliation",
+      "special_rule": "Merged intermediate repair is not golden"
+    },
+    {
+      "id": "B08",
+      "project": "Joplin",
+      "upstream_repositories": ["laurent22/joplin"],
+      "start_shas": ["8e7b1d763bb5aafc0d492802f8658541439e0c98"],
+      "golden_shas": ["011a15374cc8a23438232a6698a0016fc10ea1ba"],
+      "canonical_workflow": ".github/workflows/r7-b08-joplin-selection.yml",
+      "validated_run_id": "34194704542",
+      "oracle_class": "exact-source CodeMirror mouseup/selection semantics",
+      "extended_gate": "iOS Simulator and physical-device cursor/scroll verification"
+    }
+  ],
+  "first_cohort": {
+    "high_baseline": ["B01", "B02", "B03", "B04", "B05", "B06", "B07", "B08"],
+    "medium_comparison": ["B01", "B02", "B04", "B07", "B08"],
+    "high_plus_or_boost_comparison": ["B01", "B02", "B04", "B07", "B08"],
+    "planned_runs": 18
+  }
+}
