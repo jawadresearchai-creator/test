@@ -46,6 +46,24 @@ jobs:
           flutter-version-file: immich/mobile/pubspec.yaml
           cache: true
 
+      - name: Vendor retired historical Isar packages
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --depth=1 --branch v3 https://github.com/immich-app/isar.git immich/.r6-vendor/isar
+          # The historical custom pub server now returns HTTP 400. Vendor the exact
+          # 3.1.8 source used by Immich and widen only the obsolete SDK metadata.
+          sed -i 's/>=2.17.0 <3.0.0/>=2.17.0 <4.0.0/' immich/.r6-vendor/isar/packages/isar/pubspec.yaml
+          sed -i 's/>=2.17.0 <3.0.0/>=2.17.0 <4.0.0/' immich/.r6-vendor/isar/packages/isar_flutter_libs/pubspec.yaml
+          cat >> immich/mobile/pubspec.yaml <<'YAML'
+
+          dependency_overrides:
+            isar:
+              path: ../.r6-vendor/isar/packages/isar
+            isar_flutter_libs:
+              path: ../.r6-vendor/isar/packages/isar_flutter_libs
+          YAML
+
       - name: Get Flutter packages
         working-directory: immich/mobile
         shell: bash
@@ -69,7 +87,6 @@ jobs:
 
             setUp(() async {
               db = Drift(DatabaseConnection(NativeDatabase.memory(), closeStreamsSynchronously: true));
-              // This focused repository oracle does not exercise ownership/FK behavior.
               await db.customStatement('PRAGMA foreign_keys = OFF;');
             });
 
