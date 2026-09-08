@@ -1,0 +1,146 @@
+name: R6 B07 Immich Historical Smoke
+
+on:
+  push:
+    branches:
+      - r6-benchmark-harness-2026-09-08
+    paths:
+      - '.github/workflows/r6-b07-immich-smoke.yml'
+      - 'benchmarks/r6-b07-trigger.txt'
+  workflow_dispatch:
+
+jobs:
+  b07-oracle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        case:
+          - name: pre_fix
+            sha: c5fbbee8f68e5c9099710330f9903c4648e14c58
+            expect: fail
+          - name: first_merged_fix
+            sha: 5116b215a240b102d6109ed39d105cad6b77b641
+            expect: fail
+          - name: corrected_fix
+            sha: 7d8cd05bc2113406d621cc2ed0746b5915d3d3c5
+            expect: pass
+    steps:
+      - name: Checkout benchmark harness
+        uses: actions/checkout@v4
+
+      - name: Checkout historical Immich
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --filter=blob:none --no-checkout https://github.com/immich-app/immich.git immich
+          cd immich
+          git checkout "${{ matrix.case.sha }}"
+          git rev-parse HEAD
+
+      - name: Setup Flutter from historical pubspec
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version-file: immich/mobile/pubspec.yaml
+          cache: true
+
+      - name: Get Flutter packages
+        working-directory: immich/mobile
+        shell: bash
+        run: flutter pub get
+
+      - name: Inject B07 Drift regression oracle
+        working-directory: immich/mobile
+        shell: bash
+        run: |
+          cat > test/r6_b07_remote_album_local_thumbnail_test.dart <<'DART'
+          import 'package:drift/drift.dart';
+          import 'package:drift/native.dart';
+          import 'package:flutter_test/flutter_test.dart';
+          import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
+          import 'package:immich_mobile/domain/models/timeline.model.dart';
+          import 'package:immich_mobile/infrastructure/repositories/db.repository.dart';
+          import 'package:immich_mobile/infrastructure/repositories/timeline.repository.dart';
+
+          void main() {
+            late Drift db;
+
+            setUp(() async {
+              db = Drift(DatabaseConnection(NativeDatabase.memory(), closeStreamsSynchronously: true));
+              // This focused repository oracle does not exercise ownership/FK behavior.
+              await db.customStatement('PRAGMA foreign_keys = OFF;');
+            });
+
+            tearDown(() async {
+              await db.close();
+            });
+
+            test('remote album asset resolves matching local asset id by checksum', () async {
+              await db.customStatement("INSERT INTO remote_album_entity (id, name, owner_id, \"order\") VALUES ('album-1', 'Album', 'user-1', 1)");
+              await db.customStatement("INSERT INTO remote_asset_entity (id, checksum, owner_id, visibility, name, type) VALUES ('remote-1', 'shared-checksum', 'user-1', 0, 'remote.jpg', 1)");
+              await db.customStatement("INSERT INTO local_asset_entity (id, checksum, name, type) VALUES ('local-1', 'shared-checksum', 'local.jpg', 1)");
+              await db.customStatement("INSERT INTO remote_album_asset_entity (asset_id, album_id) VALUES ('remote-1', 'album-1')");
+
+              final sut = DriftTimelineRepository(db);
+              final query = sut.remoteAlbum('album-1', GroupAssetsBy.day);
+              final assets = await query.assetSource(0, 10);
+
+              expect(assets, hasLength(1));
+              final asset = assets.single as RemoteAsset;
+              expect(asset.id, 'remote-1');
+              expect(asset.localId, 'local-1');
+            });
+          }
+          DART
+
+      - name: Run B07 regression oracle
+        id: oracle
+        working-directory: immich/mobile
+        shell: bash
+        run: |
+          set +e
+          flutter test test/r6_b07_remote_album_local_thumbnail_test.dart
+          rc=$?
+          set -e
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+
+          if [[ "${{ matrix.case.expect }}" == "fail" ]]; then
+            if [[ "$rc" -eq 0 ]]; then
+              echo "ERROR: ${{ matrix.case.name }} unexpectedly passed the B07 oracle"
+              exit 1
+            fi
+            echo "EXPECTED: ${{ matrix.case.name }} fails the B07 oracle"
+          else
+            if [[ "$rc" -ne 0 ]]; then
+              echo "ERROR: corrected human repair did not pass the B07 oracle"
+              exit "$rc"
+            fi
+            echo "EXPECTED: corrected human repair passes the B07 oracle"
+          fi
+
+      - name: Write machine-readable smoke evidence
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p evidence
+          cat > evidence/B07-${{ matrix.case.name }}.json <<JSON
+          {
+            "schema_version": "1.0",
+            "benchmark_id": "B07",
+            "case": "${{ matrix.case.name }}",
+            "source_sha": "${{ matrix.case.sha }}",
+            "expected_oracle": "${{ matrix.case.expect }}",
+            "oracle_exit_code": "${{ steps.oracle.outputs.exit_code }}",
+            "workflow_run_id": "${{ github.run_id }}",
+            "workflow_run_attempt": "${{ github.run_attempt }}"
+          }
+          JSON
+
+      - name: Upload smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: B07-${{ matrix.case.name }}-evidence
+          path: evidence/
