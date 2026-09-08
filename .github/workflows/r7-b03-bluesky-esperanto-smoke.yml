@@ -63,15 +63,9 @@ jobs:
           const commentedEoDisplayNames = /^\s*\/\/\s*import\('@formatjs\/intl-displaynames\/locale-data\/eo'\),/m.test(eoBlock);
           assert.ok(activeEoDisplayNames || commentedEoDisplayNames, 'Esperanto DisplayNames strategy not recognized');
 
-          // Mirror Bluesky native startup: force the polyfill and preload English fallback data.
+          // Mirror native startup. Bluesky always preloads English DisplayNames data.
           require('@formatjs/intl-displaynames/polyfill-force');
           require('@formatjs/intl-displaynames/locale-data/en');
-
-          // Control locale: a populated locale-data file must work normally.
-          require('@formatjs/intl-displaynames/locale-data/es');
-          const es = new Intl.DisplayNames(['es'], {type: 'language'});
-          const spanishEnglish = es.of('en');
-          assert.ok(typeof spanishEnglish === 'string' && spanishEnglish.length > 0, 'Spanish control must produce a display name');
 
           let eoLoadError = null;
           if (activeEoDisplayNames) {
@@ -85,21 +79,28 @@ jobs:
           let eoConstructError = null;
           let eoEnglishName = null;
           try {
-            const eo = new Intl.DisplayNames(['eo'], {type: 'language'});
+            const eo = new Intl.DisplayNames(['eo'], {
+              type: 'language',
+              fallback: 'none',
+              languageDisplay: 'standard',
+            });
             eoEnglishName = eo.of('en');
           } catch (err) {
             eoConstructError = err;
           }
 
+          // Independent control: populated Spanish locale data works and localizes English.
+          require('@formatjs/intl-displaynames/locale-data/es');
+          const es = new Intl.DisplayNames(['es'], {type: 'language'});
+          const spanishEnglish = es.of('en');
+          assert.ok(typeof spanishEnglish === 'string' && spanishEnglish.length > 0, 'Spanish control must produce a display name');
+
           const packageFile = require.resolve('@formatjs/intl-displaynames/locale-data/eo');
           const eoFile = fs.readFileSync(packageFile, 'utf8');
-          const hasLocaleDataRegistration = /__addLocaleData/.test(eoFile);
-
           const evidence = {
             activeEoDisplayNames,
             commentedEoDisplayNames,
             eoLocaleFileBytes: Buffer.byteLength(eoFile),
-            hasLocaleDataRegistration,
             eoLoadError: eoLoadError && String(eoLoadError),
             eoConstructError: eoConstructError && String(eoConstructError),
             eoEnglishName,
@@ -107,23 +108,20 @@ jobs:
           };
           console.log(JSON.stringify(evidence));
 
-          // The historical package defect is that Esperanto locale-data is empty/non-registering.
-          assert.equal(hasLocaleDataRegistration, false, 'historical 6.8.13 Esperanto locale file should contain no locale-data registration');
-
           if (activeEoDisplayNames) {
-            // Bluesky's pre-fix branch attempts to load the unusable locale and then requests eo.
-            // With no eo data registered, construction must not be considered healthy.
-            if (!eoLoadError && !eoConstructError) {
-              // If FormatJS falls back rather than throws in this Node runtime, expose that as the
-              // wrong historical strategy via the source+package-data signature instead of faking a crash.
-              process.exitCode = 42;
-            } else {
-              process.exitCode = 42;
-            }
+            // 6.8.13's eo file registers an unusable locale. The application then throws
+            // Error: Missing locale data for eo rather than falling through to English.
+            assert.equal(eoLoadError, null, 'the broken file loads; failure occurs when DisplayNames resolves eo');
+            assert.ok(eoConstructError, 'pre-fix Esperanto must reproduce the missing-locale failure');
+            assert.match(String(eoConstructError), /Missing locale data for eo/);
+            process.exitCode = 42;
           } else {
-            // The accepted repair intentionally leaves the already-loaded English DisplayNames data in place.
+            // Accepted fix does not register the broken eo locale, so the polyfill resolves
+            // the request through the already-loaded English fallback.
             assert.equal(commentedEoDisplayNames, true);
             assert.equal(eoLoadError, null);
+            assert.equal(eoConstructError, null, 'fixed source must not crash constructing Esperanto DisplayNames');
+            assert.ok(typeof eoEnglishName === 'string' && eoEnglishName.length > 0, 'fixed source must return an English fallback display name');
           }
           JS
 
@@ -142,13 +140,13 @@ jobs:
           if [[ "${{ matrix.case.expect }}" == "fail" ]]; then
             test "$rc" -eq 42
             grep -F '"activeEoDisplayNames":true' b03.log >/dev/null
-            grep -F '"hasLocaleDataRegistration":false' b03.log >/dev/null
-            echo 'EXPECTED: pre-fix source activates the empty Esperanto DisplayNames locale file'
+            grep -F 'Missing locale data for eo' b03.log >/dev/null
+            echo 'EXPECTED: pre-fix source registers broken Esperanto data and crashes on locale resolution'
           else
             test "$rc" -eq 0
             grep -F '"commentedEoDisplayNames":true' b03.log >/dev/null
-            grep -F '"hasLocaleDataRegistration":false' b03.log >/dev/null
-            echo 'EXPECTED: accepted fix skips broken Esperanto DisplayNames data and retains English fallback'
+            grep -F '"eoConstructError":null' b03.log >/dev/null
+            echo 'EXPECTED: accepted fix skips broken Esperanto data and uses English fallback'
           fi
 
       - name: Upload B03 evidence
