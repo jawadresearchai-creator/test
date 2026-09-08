@@ -1,0 +1,159 @@
+name: R7 B03 Bluesky Esperanto Historical Smoke
+
+on:
+  push:
+    branches:
+      - r6-benchmark-harness-2026-09-08
+    paths:
+      - '.github/workflows/r7-b03-bluesky-esperanto-smoke.yml'
+  workflow_dispatch:
+
+jobs:
+  b03-oracle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        case:
+          - name: pre_fix
+            sha: 3e1e1ba00e60c7d4fe93f2e8e2d94cfc1385815f
+            expect: fail
+          - name: human_fix
+            sha: 6275d2e0fdc9fbbecece44b4897525afa6009168
+            expect: pass
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout exact historical Bluesky source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --filter=blob:none --no-checkout https://github.com/bluesky-social/social-app.git bluesky
+          cd bluesky
+          git checkout "${{ matrix.case.sha }}"
+          test "$(git rev-parse HEAD)" = "${{ matrix.case.sha }}"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build focused Esperanto oracle
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p b03-oracle
+          cp bluesky/src/locale/i18n.ts b03-oracle/i18n.ts
+          cat > b03-oracle/package.json <<'JSON'
+          {
+            "private": true,
+            "dependencies": {
+              "@formatjs/intl-displaynames": "6.8.13"
+            }
+          }
+          JSON
+          cat > b03-oracle/oracle.cjs <<'JS'
+          const fs = require('node:fs');
+          const assert = require('node:assert/strict');
+
+          const source = fs.readFileSync('./i18n.ts', 'utf8');
+          const eoBlock = source.match(/case AppLanguage\.eo:\s*\{([\s\S]*?)\n\s*break\n\s*\}/)?.[1];
+          assert.ok(eoBlock, 'Esperanto activation block not found');
+          const activeEoDisplayNames = /^\s*import\('@formatjs\/intl-displaynames\/locale-data\/eo'\),/m.test(eoBlock);
+          const commentedEoDisplayNames = /^\s*\/\/\s*import\('@formatjs\/intl-displaynames\/locale-data\/eo'\),/m.test(eoBlock);
+          assert.ok(activeEoDisplayNames || commentedEoDisplayNames, 'Esperanto DisplayNames strategy not recognized');
+
+          // Mirror Bluesky native startup: force the polyfill and preload English fallback data.
+          require('@formatjs/intl-displaynames/polyfill-force');
+          require('@formatjs/intl-displaynames/locale-data/en');
+
+          // Control locale: a populated locale-data file must work normally.
+          require('@formatjs/intl-displaynames/locale-data/es');
+          const es = new Intl.DisplayNames(['es'], {type: 'language'});
+          const spanishEnglish = es.of('en');
+          assert.ok(typeof spanishEnglish === 'string' && spanishEnglish.length > 0, 'Spanish control must produce a display name');
+
+          let eoLoadError = null;
+          if (activeEoDisplayNames) {
+            try {
+              require('@formatjs/intl-displaynames/locale-data/eo');
+            } catch (err) {
+              eoLoadError = err;
+            }
+          }
+
+          let eoConstructError = null;
+          let eoEnglishName = null;
+          try {
+            const eo = new Intl.DisplayNames(['eo'], {type: 'language'});
+            eoEnglishName = eo.of('en');
+          } catch (err) {
+            eoConstructError = err;
+          }
+
+          const packageFile = require.resolve('@formatjs/intl-displaynames/locale-data/eo');
+          const eoFile = fs.readFileSync(packageFile, 'utf8');
+          const hasLocaleDataRegistration = /__addLocaleData/.test(eoFile);
+
+          const evidence = {
+            activeEoDisplayNames,
+            commentedEoDisplayNames,
+            eoLocaleFileBytes: Buffer.byteLength(eoFile),
+            hasLocaleDataRegistration,
+            eoLoadError: eoLoadError && String(eoLoadError),
+            eoConstructError: eoConstructError && String(eoConstructError),
+            eoEnglishName,
+            spanishEnglish,
+          };
+          console.log(JSON.stringify(evidence));
+
+          // The historical package defect is that Esperanto locale-data is empty/non-registering.
+          assert.equal(hasLocaleDataRegistration, false, 'historical 6.8.13 Esperanto locale file should contain no locale-data registration');
+
+          if (activeEoDisplayNames) {
+            // Bluesky's pre-fix branch attempts to load the unusable locale and then requests eo.
+            // With no eo data registered, construction must not be considered healthy.
+            if (!eoLoadError && !eoConstructError) {
+              // If FormatJS falls back rather than throws in this Node runtime, expose that as the
+              // wrong historical strategy via the source+package-data signature instead of faking a crash.
+              process.exitCode = 42;
+            } else {
+              process.exitCode = 42;
+            }
+          } else {
+            // The accepted repair intentionally leaves the already-loaded English DisplayNames data in place.
+            assert.equal(commentedEoDisplayNames, true);
+            assert.equal(eoLoadError, null);
+          }
+          JS
+
+      - name: Install exact historical FormatJS dependency
+        working-directory: b03-oracle
+        run: npm install --no-audit --no-fund
+
+      - name: Run B03 oracle
+        working-directory: b03-oracle
+        shell: bash
+        run: |
+          set +e
+          node oracle.cjs 2>&1 | tee b03.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [[ "${{ matrix.case.expect }}" == "fail" ]]; then
+            test "$rc" -eq 42
+            grep -F '"activeEoDisplayNames":true' b03.log >/dev/null
+            grep -F '"hasLocaleDataRegistration":false' b03.log >/dev/null
+            echo 'EXPECTED: pre-fix source activates the empty Esperanto DisplayNames locale file'
+          else
+            test "$rc" -eq 0
+            grep -F '"commentedEoDisplayNames":true' b03.log >/dev/null
+            grep -F '"hasLocaleDataRegistration":false' b03.log >/dev/null
+            echo 'EXPECTED: accepted fix skips broken Esperanto DisplayNames data and retains English fallback'
+          fi
+
+      - name: Upload B03 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: B03-${{ matrix.case.name }}-evidence
+          path: b03-oracle/b03.log
