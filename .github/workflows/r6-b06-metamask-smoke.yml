@@ -65,10 +65,12 @@ jobs:
       - name: Run B06 regression oracle
         id: oracle
         working-directory: metamask-mobile
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
         shell: bash
         run: |
           set +e
-          yarn jest app/components/Views/confirmations/components/confirmation-asset-polling-provider/confirmation-asset-polling-provider.test.tsx --runInBand
+          yarn jest app/components/Views/confirmations/components/confirmation-asset-polling-provider/confirmation-asset-polling-provider.test.tsx --runInBand --forceExit
           rc=$?
           set -e
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
