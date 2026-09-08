@@ -56,12 +56,12 @@ jobs:
           yarn --version
           yarn workspaces focus @joplin/editor
 
-      - name: Generate editor JavaScript artifacts required by Jest bootstrap
+      - name: Generate only polyfills.js required by Jest bootstrap
         working-directory: joplin
         shell: bash
         run: |
           set -euxo pipefail
-          yarn workspace @joplin/editor tsc
+          yarn workspace @joplin/editor exec tsc polyfills.ts --target es2017 --module commonjs --lib es2017,dom --skipLibCheck
           test -f packages/editor/polyfills.js
 
       - name: Run maintainer post-fix selection regression test
